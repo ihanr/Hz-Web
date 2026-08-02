@@ -2498,6 +2498,7 @@
                 trafficBarsHint: "Daily bars per server (latest 7 days in view, scroll for history).",
                 footerNote: "Note: This console uses Basic Auth; access via HTTPS. | build 20260116-01",
                 loginFailed: "Login failed.",
+                serviceError: "Service temporarily unavailable. Please try again later.",
                 networkError: "Network error.",
                 loadServersFailed: "Failed to load servers.",
                 dnsCheckFailed: "DNS check failed.",
@@ -2630,6 +2631,7 @@
               trafficBarsHint: "按天展示每台服务器（默认显示最新 7 天，可左右滚动）。",
               footerNote: "提示：此控制台使用 Basic Auth，建议通过 HTTPS 访问。| build 20260116-01 By__22号仔Stringer🫧",
                 loginFailed: "登录失败。",
+                serviceError: "服务暂时不可用，请稍后重试。",
                 networkError: "网络错误。",
                 loadServersFailed: "加载服务器失败。",
                 dnsCheckFailed: "DNS 检查失败。",
@@ -3047,7 +3049,9 @@
               }
               const res = await fetch("/api/servers", { headers: this.authHeader() });
               if (!res.ok) {
-                this.error = this.langPack.loginFailed;
+                this.error = res.status === 401 || res.status === 403
+                  ? this.langPack.loginFailed
+                  : this.langPack.serviceError;
                 return;
               }
               localStorage.setItem("hz_user", this.username);
