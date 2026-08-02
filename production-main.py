@@ -205,6 +205,17 @@ def _record_rebuild_event(server_id: int, server_name: str, source: str) -> None
     _save_report_state(state)
 
 
+def _parse_rebuild_timestamp(value: Any) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+    local_tz = _now_local().tzinfo
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=local_tz)
+    return parsed.astimezone(local_tz)
+
+
 def _summarize_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
     stats = state.get("rebuild_stats", {}) or {}
     total = 0
@@ -218,9 +229,8 @@ def _summarize_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
         iso = entry.get("last_time_iso")
         if not iso:
             continue
-        try:
-            parsed = datetime.fromisoformat(iso)
-        except Exception:
+        parsed = _parse_rebuild_timestamp(iso)
+        if parsed is None:
             continue
         if last_time is None or parsed > last_time:
             last_time = parsed
