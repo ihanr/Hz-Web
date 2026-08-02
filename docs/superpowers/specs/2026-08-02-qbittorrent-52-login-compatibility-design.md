@@ -23,7 +23,7 @@ HTTP 403, network errors, and every other response continue through the existing
 
 ## Post-login validation
 
-After either successful login response, Hetzner-Web continues to request `/api/v2/transfer/info` and `/api/v2/sync/maindata`. A failure in those calls remains an instance failure, so accepting HTTP 204 does not bypass actual connectivity or session validation.
+After either successful login response, Hetzner-Web continues to request `/api/v2/sync/maindata`. A failure in that call remains an instance failure, so accepting HTTP 204 does not bypass actual connectivity or session validation.
 
 ## Tests
 
