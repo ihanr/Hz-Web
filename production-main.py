@@ -296,6 +296,17 @@ def _normalize_qb_instances(qb_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _qb_login_succeeded(response: Optional[requests.Response]) -> bool:
+    if response is None:
+        return False
+    if response.status_code == 204:
+        return True
+    return (
+        response.status_code == 200
+        and response.text.strip().lower().startswith("ok")
+    )
+
+
 def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str, Any]:
     base_url = str(instance.get("url") or "").rstrip("/")
     name = instance.get("name") or base_url
@@ -334,7 +345,7 @@ def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str,
                 timeout=timeout,
                 verify=verify_ssl,
             )
-            if login.status_code == 200 and login.text.strip().lower().startswith("ok"):
+            if _qb_login_succeeded(login):
                 break
             body = login.text.strip()
             if body:
@@ -345,7 +356,7 @@ def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str,
             last_error = exc
         if attempt + 1 < login_retries:
             time.sleep(login_retry_delay)
-    if not login or login.status_code != 200 or "Ok." not in login.text:
+    if not _qb_login_succeeded(login):
         return {
             "name": name,
             "url": base_url,
