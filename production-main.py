@@ -6,11 +6,12 @@ import json
 import os
 import shutil
 import socket
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 import yaml
@@ -26,7 +27,7 @@ WEB_CONFIG_PATH = os.environ.get("WEB_CONFIG_PATH", "/app/web_config.json")
 THRESHOLD_STATE_PATH = os.environ.get("THRESHOLD_STATE_PATH", "/app/threshold_state.json")
 REPORT_STATE_PATH = os.environ.get("REPORT_STATE_PATH", "/app/report_state.json")
 REPORT_STATE_BACKUP_DIR = os.environ.get("REPORT_STATE_BACKUP_DIR", "/app/report_state_backups")
-REPORT_STATE_BACKUP_KEEP = 3
+REPORT_STATE_BACKUP_KEEP = 7
 
 ALERT_STATE: Dict[str, Dict[str, Optional[float]]] = {}
 REBUILD_LOCKS: Dict[str, threading.Lock] = {}
@@ -38,6 +39,11 @@ CF_RETRY_ATTEMPTS = 3
 CF_RETRY_DELAY_SECONDS = 5
 CF_REBUILD_SYNC_DELAY_SECONDS = 90
 CF_VERIFY_DELAY_SECONDS = 120
+REPORT_STATE_LOCK = threading.RLock()
+
+
+class ReportStateError(RuntimeError):
+    pass
 
 
 def _load_yaml(path: str) -> Dict[str, Any]:
@@ -58,10 +64,36 @@ def _load_json(path: str) -> Dict[str, Any]:
 
 
 def _save_json(path: str, data: Dict[str, Any]) -> None:
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, path)
+    _atomic_write_json(path, data)
+
+
+def _atomic_write_json(path: str, data: Dict[str, Any]) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(parent, os.O_RDONLY)
+        except (AttributeError, OSError):
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def _load_threshold_state() -> Dict[str, int]:
@@ -101,26 +133,74 @@ def _now_local() -> datetime:
     return datetime.now().astimezone()
 
 
-def _load_report_state() -> Dict[str, Any]:
+def _read_json_object(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    if not isinstance(state, dict):
+        raise ValueError(f"JSON root is not an object: {path}")
+    return state
+
+
+def _report_state_backup_paths() -> List[str]:
+    if not os.path.isdir(REPORT_STATE_BACKUP_DIR):
+        return []
+    return sorted(
+        (
+            os.path.join(REPORT_STATE_BACKUP_DIR, name)
+            for name in os.listdir(REPORT_STATE_BACKUP_DIR)
+            if name.startswith("report_state.json.bak.")
+            and os.path.isfile(os.path.join(REPORT_STATE_BACKUP_DIR, name))
+        ),
+        reverse=True,
+    )
+
+
+def _load_report_state_unlocked() -> Dict[str, Any]:
     if not os.path.exists(REPORT_STATE_PATH):
         return {}
     try:
-        with open(REPORT_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        return _read_json_object(REPORT_STATE_PATH)
+    except Exception as active_error:
+        for backup_path in _report_state_backup_paths():
+            try:
+                recovered = _read_json_object(backup_path)
+                print(f"[alert] report state recovered from backup: {backup_path}")
+                return recovered
+            except Exception:
+                continue
+        raise ReportStateError(
+            f"report state is invalid and no valid backup is available: {active_error}"
+        ) from active_error
+
+
+def _load_report_state() -> Dict[str, Any]:
+    with REPORT_STATE_LOCK:
+        return _load_report_state_unlocked()
+
+
+def _save_report_state_unlocked(state: Dict[str, Any]) -> None:
+    _backup_report_state()
+    _atomic_write_json(REPORT_STATE_PATH, state)
 
 
 def _save_report_state(state: Dict[str, Any]) -> None:
-    _backup_report_state()
-    with open(REPORT_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
+    with REPORT_STATE_LOCK:
+        _save_report_state_unlocked(state)
+
+
+def _update_report_state(mutator: Callable[[Dict[str, Any]], Any]) -> Any:
+    with REPORT_STATE_LOCK:
+        state = _load_report_state_unlocked()
+        result = mutator(state)
+        _save_report_state_unlocked(state)
+        return result
 
 
 def _backup_report_state() -> None:
     if not os.path.exists(REPORT_STATE_PATH):
         return
     try:
+        _read_json_object(REPORT_STATE_PATH)
         os.makedirs(REPORT_STATE_BACKUP_DIR, exist_ok=True)
         ts = _now_local().strftime("%Y%m%d")
         filename = f"report_state.json.bak.{ts}"
