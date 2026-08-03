@@ -4,7 +4,6 @@ import base64
 import hmac
 import json
 import os
-import shutil
 import socket
 import tempfile
 import threading
@@ -200,14 +199,18 @@ def _backup_report_state() -> None:
     if not os.path.exists(REPORT_STATE_PATH):
         return
     try:
-        _read_json_object(REPORT_STATE_PATH)
+        active_state = _read_json_object(REPORT_STATE_PATH)
         os.makedirs(REPORT_STATE_BACKUP_DIR, exist_ok=True)
         ts = _now_local().strftime("%Y%m%d")
         filename = f"report_state.json.bak.{ts}"
         dst = os.path.join(REPORT_STATE_BACKUP_DIR, filename)
         if os.path.exists(dst):
-            return
-        shutil.copyfile(REPORT_STATE_PATH, dst)
+            try:
+                _read_json_object(dst)
+                return
+            except Exception:
+                pass
+        _atomic_write_json(dst, active_state)
         backups = sorted(
             name
             for name in os.listdir(REPORT_STATE_BACKUP_DIR)

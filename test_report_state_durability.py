@@ -60,6 +60,24 @@ def test_load_report_state_refuses_silent_reset_without_valid_backup(tmp_path):
         main._load_report_state()
 
 
+def test_backup_replaces_an_invalid_backup_for_the_current_day(tmp_path, monkeypatch):
+    configure_paths(tmp_path)
+    active_state = {"hourly": {"2026-08-03 10:00": {}}}
+    write_json(Path(main.REPORT_STATE_PATH), active_state)
+    backup_path = Path(main.REPORT_STATE_BACKUP_DIR) / "report_state.json.bak.20260803"
+    backup_path.parent.mkdir()
+    backup_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(
+        main,
+        "_now_local",
+        lambda: main.datetime.fromisoformat("2026-08-03T15:00:00+08:00"),
+    )
+
+    main._backup_report_state()
+
+    assert json.loads(backup_path.read_text(encoding="utf-8")) == active_state
+
+
 def test_concurrent_rebuild_events_do_not_overwrite_each_other(tmp_path, monkeypatch):
     configure_paths(tmp_path)
     write_json(Path(main.REPORT_STATE_PATH), {"rebuild_stats": {}})
