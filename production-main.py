@@ -2446,6 +2446,9 @@ def _perform_manual_create(
     server_type: Optional[str] = None,
     preferred_location: Optional[str] = None,
     allow_fallback: bool = True,
+    source: Optional[str] = None,
+    image_id: Optional[int] = None,
+    ssh_key_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     name = str(server_name or "").strip()
     lock = REBUILD_LOCKS.setdefault(f"manual:{name}", threading.Lock())
@@ -2456,13 +2459,20 @@ def _perform_manual_create(
             "error_code": "manual_create_in_progress",
         }
     try:
-        result = client.create_missing_server(
-            name,
-            config,
-            server_type=server_type,
-            preferred_location=preferred_location,
-            allow_fallback=allow_fallback,
-        )
+        create_options: Dict[str, Any] = {
+            "server_type": server_type,
+            "preferred_location": preferred_location,
+            "allow_fallback": allow_fallback,
+        }
+        if source is not None or image_id is not None or ssh_key_ids is not None:
+            create_options.update(
+                {
+                    "source": source,
+                    "image_id": image_id,
+                    "ssh_key_ids": ssh_key_ids,
+                }
+            )
+        result = client.create_missing_server(name, config, **create_options)
         telegram_cfg = config.get("telegram") or {}
         bot_token = telegram_cfg.get("bot_token", "")
         chat_id = telegram_cfg.get("chat_id", "")
@@ -3864,6 +3874,21 @@ async def api_rebuild(request: Request) -> JSONResponse:
     return JSONResponse({"rebuild": result, "dns": result.get("dns")})
 
 
+@app.get("/api/create_catalog")
+def api_create_catalog(request: Request, name: str) -> JSONResponse:
+    _require_auth(request)
+    config = _load_yaml(CONFIG_PATH)
+    client = HetznerClient(config["hetzner"]["api_token"])
+    try:
+        return JSONResponse(_build_manual_create_catalog(name, config, client))
+    except ManualCreateCatalogError as exc:
+        status_code = 409 if exc.code == "already_exists" else 400
+        return JSONResponse(
+            {"success": False, "error": str(exc), "error_code": exc.code},
+            status_code=status_code,
+        )
+
+
 @app.post("/api/create_missing")
 async def api_create_missing(request: Request) -> JSONResponse:
     _require_auth(request)
@@ -3883,6 +3908,55 @@ async def api_create_missing(request: Request) -> JSONResponse:
             },
             status_code=400,
         )
+    source = payload.get("source")
+    if source is not None:
+        source = str(source).strip().lower()
+        if source not in {"snapshot", "system"}:
+            return JSONResponse(
+                {"success": False, "error": "Invalid creation source", "error_code": "invalid_source"},
+                status_code=400,
+            )
+
+    image_id = payload.get("image_id")
+    if image_id is not None:
+        if isinstance(image_id, bool):
+            normalized_image_id = None
+        else:
+            try:
+                normalized_image_id = int(image_id)
+            except (TypeError, ValueError):
+                normalized_image_id = None
+        if normalized_image_id is None:
+            return JSONResponse(
+                {"success": False, "error": "Invalid image ID", "error_code": "invalid_image_id"},
+                status_code=400,
+            )
+        image_id = normalized_image_id
+
+    raw_ssh_key_ids = payload.get("ssh_key_ids")
+    ssh_key_ids = None
+    if raw_ssh_key_ids is not None:
+        if not isinstance(raw_ssh_key_ids, list):
+            return JSONResponse(
+                {"success": False, "error": "SSH key IDs must be a list", "error_code": "invalid_ssh_key_ids"},
+                status_code=400,
+            )
+        ssh_key_ids = []
+        for raw_key_id in raw_ssh_key_ids:
+            if isinstance(raw_key_id, bool):
+                key_id = None
+            else:
+                try:
+                    key_id = int(raw_key_id)
+                except (TypeError, ValueError):
+                    key_id = None
+            if key_id is None:
+                return JSONResponse(
+                    {"success": False, "error": "Invalid SSH key ID", "error_code": "invalid_ssh_key_id"},
+                    status_code=400,
+                )
+            if key_id not in ssh_key_ids:
+                ssh_key_ids.append(key_id)
     config = _load_yaml(CONFIG_PATH)
     client = HetznerClient(config["hetzner"]["api_token"])
     result = _perform_manual_create(
@@ -3892,6 +3966,9 @@ async def api_create_missing(request: Request) -> JSONResponse:
         server_type=server_type,
         preferred_location=preferred_location,
         allow_fallback=raw_allow_fallback,
+        source=source,
+        image_id=image_id,
+        ssh_key_ids=ssh_key_ids,
     )
     if not result.get("success"):
         error_code = result.get("error_code")
@@ -3903,6 +3980,15 @@ async def api_create_missing(request: Request) -> JSONResponse:
             "invalid_manual_create_config",
             "server_type_not_allowed",
             "location_not_allowed",
+            "invalid_source",
+            "invalid_image_id",
+            "image_not_available",
+            "server_type_not_available",
+            "architecture_mismatch",
+            "snapshot_disk_too_large",
+            "invalid_ssh_key_id",
+            "ssh_key_required",
+            "ssh_key_not_available",
         }:
             status_code = 400
         else:
