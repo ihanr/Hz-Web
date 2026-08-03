@@ -91,7 +91,7 @@ git commit -m "fix: make report state persistence durable"
 
 - [ ] **Step 1: Write failing concurrency and tracking-start tests**
 
-Use two threads and a barrier inside two mutators so the test would lose one top-level key if the read-modify-write transaction were not serialized. Add literal tracking fixtures proving a configured July 1 start is clamped to the actual July 28 first sample, while a configured in-range start is retained.
+Use multiple threads that repeatedly increment the same persisted counter through `_update_report_state`; assert the final value equals the exact thread-count times iteration-count so any lost read-modify-write update fails the test without introducing a lock-internal barrier deadlock. Add literal tracking fixtures proving a configured July 1 start is clamped to the actual July 28 first sample, while a configured in-range start is retained.
 
 ```python
 def test_tracking_start_does_not_predate_available_history():
