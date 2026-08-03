@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import requests
 
 
@@ -88,12 +89,15 @@ def hetzner_error(status, code, message):
 
 
 class FakeCreateClient(main.HetznerClient):
-    def __init__(self, create_results, live_servers=None):
+    def __init__(self, create_results, live_servers=None, images=None, server_types=None, ssh_keys=None):
         super().__init__("unused")
         self.create_results = list(create_results)
         self.live_servers = list(live_servers or [])
         self.create_payloads = []
         self.delete_calls = []
+        self.images = images
+        self.server_types = server_types
+        self.ssh_keys = ssh_keys
 
     def get_servers(self):
         return self.live_servers
@@ -101,6 +105,18 @@ class FakeCreateClient(main.HetznerClient):
     def delete_server(self, server_id):
         self.delete_calls.append(server_id)
         raise AssertionError("manual create must never delete a server")
+
+    def get_images(self, image_type):
+        assert self.images is not None
+        return list(self.images.get(image_type, []))
+
+    def get_server_types(self):
+        assert self.server_types is not None
+        return list(self.server_types)
+
+    def get_ssh_keys(self):
+        assert self.ssh_keys is not None
+        return list(self.ssh_keys)
 
     def _request(self, method, endpoint, **kwargs):
         assert method == "POST"
@@ -289,6 +305,140 @@ def test_manual_create_without_fallback_attempts_only_preferred_location():
     assert [
         payload["location"] for payload in client.create_payloads
     ] == ["hel1"]
+
+
+def dynamic_resources():
+    return {
+        "images": {
+            "snapshot": [
+                {
+                    "id": 412977893,
+                    "type": "snapshot",
+                    "status": "available",
+                    "architecture": "x86",
+                    "disk_size": 80,
+                },
+                {
+                    "id": 412977894,
+                    "type": "snapshot",
+                    "status": "available",
+                    "architecture": "x86",
+                    "disk_size": 120,
+                },
+            ],
+            "system": [
+                {
+                    "id": 1001,
+                    "type": "system",
+                    "status": "available",
+                    "name": "debian-12",
+                    "architecture": "x86",
+                    "disk_size": 5,
+                },
+                {
+                    "id": 1002,
+                    "type": "system",
+                    "status": "available",
+                    "name": "deprecated-os",
+                    "deprecated": "2026-01-01T00:00:00+00:00",
+                    "architecture": "x86",
+                    "disk_size": 5,
+                },
+                {
+                    "id": 1003,
+                    "type": "system",
+                    "status": "available",
+                    "name": "arm-os",
+                    "architecture": "arm",
+                    "disk_size": 5,
+                },
+            ],
+        },
+        "server_types": [
+            {"name": "cx23", "architecture": "x86", "disk": 40},
+            {"name": "cx33", "architecture": "x86", "disk": 80},
+            {"name": "cx43", "architecture": "x86", "disk": 160},
+            {"name": "cax11", "architecture": "arm", "disk": 40},
+            {"name": "cx-old", "architecture": "x86", "disk": 80, "deprecated": True},
+        ],
+        "ssh_keys": [{"id": 77, "name": "shoo"}, {"id": 88, "name": "backup"}],
+    }
+
+
+def dynamic_client(create_results=None, **overrides):
+    resources = dynamic_resources()
+    resources.update(overrides)
+    return FakeCreateClient(create_results or [9100], **resources)
+
+
+def test_manual_create_from_official_image_uses_selected_resources():
+    client = dynamic_client()
+
+    result = client.create_missing_server(
+        "2",
+        manual_config(),
+        source="system",
+        image_id=1001,
+        server_type="cx23",
+        preferred_location="nbg1",
+        ssh_key_ids=[77],
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "system"
+    assert result["image_id"] == 1001
+    assert client.create_payloads == [
+        {
+            "name": "2",
+            "server_type": "cx23",
+            "image": 1001,
+            "location": "nbg1",
+            "start_after_create": True,
+            "ssh_keys": [77],
+        }
+    ]
+    assert "root_password" not in result
+
+
+@pytest.mark.parametrize(
+    ("options", "error_code"),
+    [
+        ({"source": "backup", "image_id": 1001, "server_type": "cx23", "ssh_key_ids": [77]}, "invalid_source"),
+        ({"source": "system", "image_id": 9999, "server_type": "cx23", "ssh_key_ids": [77]}, "image_not_available"),
+        ({"source": "system", "image_id": 1002, "server_type": "cx23", "ssh_key_ids": [77]}, "image_not_available"),
+        ({"source": "system", "image_id": 1003, "server_type": "cx23", "ssh_key_ids": [77]}, "architecture_mismatch"),
+        ({"source": "snapshot", "image_id": 412977894, "server_type": "cx33"}, "snapshot_disk_too_large"),
+        ({"source": "system", "image_id": 1001, "server_type": "cx-old", "ssh_key_ids": [77]}, "server_type_not_available"),
+        ({"source": "system", "image_id": 1001, "server_type": "cx23", "ssh_key_ids": [999]}, "ssh_key_not_available"),
+        ({"source": "system", "image_id": 1001, "server_type": "cx23", "ssh_key_ids": []}, "ssh_key_required"),
+    ],
+)
+def test_manual_create_revalidates_dynamic_selection(options, error_code):
+    client = dynamic_client()
+
+    result = client.create_missing_server("2", manual_config(), **options)
+
+    assert result["success"] is False
+    assert result["error_code"] == error_code
+    assert client.create_payloads == []
+
+
+def test_explicit_snapshot_mode_uses_numeric_id_and_no_ssh_keys():
+    client = dynamic_client()
+
+    result = client.create_missing_server(
+        "2",
+        manual_config(),
+        source="snapshot",
+        image_id=412977893,
+        server_type="cx33",
+        preferred_location="fsn1",
+        ssh_key_ids=[77],
+    )
+
+    assert result["success"] is True
+    assert client.create_payloads[0]["image"] == 412977893
+    assert "ssh_keys" not in client.create_payloads[0]
 
 
 def workflow_config():

@@ -1190,6 +1190,103 @@ def _build_manual_create_catalog(
     }
 
 
+def _validate_manual_create_selection(
+    name: str,
+    config: Dict[str, Any],
+    client: "HetznerClient",
+    source: str,
+    image_id: Any,
+    server_type: Optional[str],
+    preferred_location: Optional[str],
+    ssh_key_ids: Optional[List[int]],
+) -> Dict[str, Any]:
+    server_name = str(name or "").strip()
+    rebuild_cfg = config.get("rebuild") or {}
+    options = _manual_create_options(config)
+    if not options["enabled"]:
+        raise ManualCreateCatalogError("manual_create_disabled", "Manual creation is disabled")
+    snapshot_map = rebuild_cfg.get("snapshot_id_map") or {}
+    if not server_name or not isinstance(snapshot_map, dict) or not snapshot_map.get(server_name):
+        raise ManualCreateCatalogError("name_not_allowed", "Server name is not allowed")
+
+    existing_names = {
+        str(server.get("name") or "").strip() for server in client.get_servers()
+    }
+    if server_name in existing_names:
+        raise ManualCreateCatalogError("already_exists", f"Server {server_name} already exists")
+
+    selected_source = str(source or "").strip().lower()
+    if selected_source not in {"snapshot", "system"}:
+        raise ManualCreateCatalogError("invalid_source", "Invalid creation source")
+    try:
+        selected_image_id = int(image_id)
+    except (TypeError, ValueError):
+        raise ManualCreateCatalogError("invalid_image_id", "Invalid image ID")
+
+    selected_location = str(preferred_location or options["default_location"]).strip().lower()
+    if selected_location not in options["locations"]:
+        raise ManualCreateCatalogError("location_not_allowed", f"Location {selected_location} is not allowed")
+
+    selected_server_type = str(server_type or options["default_server_type"]).strip().lower()
+    type_row = next(
+        (item for item in client.get_server_types() if str(item.get("name") or "").strip().lower() == selected_server_type),
+        None,
+    )
+    if not type_row or type_row.get("deprecated"):
+        raise ManualCreateCatalogError("server_type_not_available", f"Server type {selected_server_type} is unavailable")
+
+    image_row = next(
+        (image for image in client.get_images(selected_source) if str(image.get("id")) == str(selected_image_id)),
+        None,
+    )
+    if (
+        not image_row
+        or image_row.get("type") != selected_source
+        or image_row.get("status") != "available"
+        or image_row.get("deprecated")
+    ):
+        raise ManualCreateCatalogError("image_not_available", "Selected image is unavailable")
+
+    image_architecture = str(image_row.get("architecture") or "").lower()
+    type_architecture = str(type_row.get("architecture") or "").lower()
+    if image_architecture and type_architecture != image_architecture:
+        raise ManualCreateCatalogError("architecture_mismatch", "Image and server type architectures do not match")
+
+    selected_ssh_keys: List[int] = []
+    if selected_source == "snapshot":
+        try:
+            image_disk = int(image_row.get("disk_size") or 0)
+            type_disk = int(type_row.get("disk") or 0)
+        except (TypeError, ValueError):
+            image_disk = type_disk = 0
+        if image_disk and type_disk and image_disk > type_disk:
+            raise ManualCreateCatalogError("snapshot_disk_too_large", "Snapshot disk is larger than the selected server disk")
+    else:
+        for value in ssh_key_ids or []:
+            try:
+                key_id = int(value)
+            except (TypeError, ValueError):
+                raise ManualCreateCatalogError("invalid_ssh_key_id", "Invalid SSH key ID")
+            if key_id not in selected_ssh_keys:
+                selected_ssh_keys.append(key_id)
+        if not selected_ssh_keys:
+            raise ManualCreateCatalogError("ssh_key_required", "An SSH key is required for official images")
+        project_key_ids = {
+            int(item["id"]) for item in client.get_ssh_keys() if item.get("id") is not None
+        }
+        if any(key_id not in project_key_ids for key_id in selected_ssh_keys):
+            raise ManualCreateCatalogError("ssh_key_not_available", "Selected SSH key is unavailable")
+
+    return {
+        "name": server_name,
+        "source": selected_source,
+        "image_id": selected_image_id,
+        "server_type": selected_server_type,
+        "location": selected_location,
+        "ssh_key_ids": selected_ssh_keys,
+    }
+
+
 def _hetzner_http_error(exc: Exception) -> Dict[str, Any]:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -1431,6 +1528,9 @@ class HetznerClient:
         server_type: Optional[str] = None,
         preferred_location: Optional[str] = None,
         allow_fallback: bool = True,
+        source: Optional[str] = None,
+        image_id: Optional[int] = None,
+        ssh_key_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         server_name = str(name or "").strip()
         rebuild_cfg = config.get("rebuild") or {}
@@ -1450,6 +1550,37 @@ class HetznerClient:
                 "error": "该服务器名称不在手动创建白名单中",
                 "error_code": "name_not_allowed",
             }
+
+        selected_source = "snapshot"
+        selected_ssh_keys: List[int] = []
+        explicit_selection = source is not None or image_id is not None
+        if explicit_selection:
+            try:
+                selection = _validate_manual_create_selection(
+                    server_name,
+                    config,
+                    self,
+                    str(source or ""),
+                    image_id,
+                    server_type,
+                    preferred_location,
+                    ssh_key_ids,
+                )
+            except ManualCreateCatalogError as exc:
+                return {
+                    "success": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                }
+            selected_source = selection["source"]
+            selected_ssh_keys = selection["ssh_key_ids"]
+            snapshot_id = selection["image_id"]
+            server_type = selection["server_type"]
+            preferred_location = selection["location"]
+            options = dict(options)
+            options["server_types"] = list(options["server_types"])
+            if server_type not in options["server_types"]:
+                options["server_types"].append(server_type)
 
         selected_server_type = str(
             server_type or options["default_server_type"]
@@ -1498,6 +1629,8 @@ class HetznerClient:
                 "location": location,
                 "start_after_create": True,
             }
+            if selected_source == "system":
+                create_data["ssh_keys"] = selected_ssh_keys
             attempted_locations.append(location)
             try:
                 response = self._request("POST", "servers", json=create_data)
@@ -1516,6 +1649,8 @@ class HetznerClient:
                     "new_server_id": new_server.get("id"),
                     "new_ip": ipv4.get("ip"),
                     "snapshot_id": snapshot_id,
+                    "image_id": snapshot_id,
+                    "source": selected_source,
                     "server_type": selected_server_type,
                     "new_location": location,
                     "attempted_locations": attempted_locations,
