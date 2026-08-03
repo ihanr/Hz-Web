@@ -322,6 +322,10 @@
         font-weight: 700;
       }
 
+      .create-field-wide {
+        grid-column: 1 / -1;
+      }
+
       .create-select {
         width: 100%;
         height: 42px;
@@ -2063,7 +2067,7 @@
                         :disabled="isCreatingServer(s.name)"
                         @click="openCreateDialog(s.name)"
                       >
-                        {{ isCreatingServer(s.name) ? langPack.creatingServer : langPack.createFromSnapshot }}
+                        {{ isCreatingServer(s.name) ? langPack.creatingServer : langPack.createServer }}
                       </button>
                       <template v-else-if="!demoMode">
                         <button class="btn" @click="dnsCheck(s.id)">{{ langPack.dnsCheck }}</button>
@@ -2176,24 +2180,51 @@
           <h3>{{ langPack.createDialogTitle.replace("{name}", createDialog.name) }}</h3>
           <div class="muted create-modal-intro">{{ langPack.createDialogIntro }}</div>
           <div class="create-form-grid">
+            <label class="create-field create-field-wide">
+              {{ langPack.createSource }}
+              <select class="create-select" v-model="createDialog.source" @change="onCreateSourceChange">
+                <option value="snapshot">{{ langPack.createSourceSnapshot }}</option>
+                <option value="system">{{ langPack.createSourceSystem }}</option>
+              </select>
+            </label>
+            <label class="create-field create-field-wide">
+              {{ createDialog.source === "system" ? langPack.createSystemImage : langPack.createSnapshot }}
+              <select class="create-select" v-model.number="createDialog.imageId" @change="onCreateImageChange">
+                <option
+                  v-for="image in createImageOptions"
+                  :key="image.id"
+                  :value="image.id"
+                >{{ image.label || image.name || image.id }}</option>
+              </select>
+            </label>
             <label class="create-field">
               {{ langPack.createServerType }}
               <select class="create-select" v-model="createDialog.serverType">
                 <option
-                  v-for="serverType in manualCreateOptions.server_types"
-                  :key="serverType"
-                  :value="serverType"
-                >{{ serverType.toUpperCase() }}</option>
+                  v-for="serverType in createCompatibleServerTypes"
+                  :key="serverType.name"
+                  :value="serverType.name"
+                >{{ formatCreateServerType(serverType) }}</option>
               </select>
             </label>
             <label class="create-field">
               {{ langPack.createPreferredLocation }}
               <select class="create-select" v-model="createDialog.preferredLocation">
                 <option
-                  v-for="location in manualCreateOptions.locations"
+                  v-for="location in createCatalog.locations"
                   :key="location"
                   :value="location"
                 >{{ location }}</option>
+              </select>
+            </label>
+            <label v-if="createDialog.source === 'system'" class="create-field create-field-wide">
+              {{ langPack.createSshKey }}
+              <select class="create-select" v-model.number="createDialog.sshKeyId">
+                <option
+                  v-for="sshKey in createCatalog.sshKeys"
+                  :key="sshKey.id"
+                  :value="sshKey.id"
+                >{{ sshKey.name }} · {{ sshKey.fingerprint }}</option>
               </select>
             </label>
           </div>
@@ -2204,7 +2235,7 @@
           <div class="create-summary">
             <div>
               {{ langPack.createSelected }}:
-              <strong>{{ createDialog.serverType.toUpperCase() }} + {{ createDialog.preferredLocation }}</strong>
+              <strong>{{ createDialog.source === "system" ? langPack.createSourceSystem : langPack.createSourceSnapshot }} · {{ createDialog.serverType.toUpperCase() }} + {{ createDialog.preferredLocation }}</strong>
             </div>
             <div>
               {{ langPack.createAttemptOrder }}:
@@ -2220,7 +2251,7 @@
             >{{ langPack.cancel }}</button>
             <button
               class="btn primary"
-              :disabled="isCreatingServer(createDialog.name)"
+              :disabled="isCreatingServer(createDialog.name) || !createCanSubmit"
               @click="submitCreateMissing"
             >{{ isCreatingServer(createDialog.name) ? langPack.creatingServer : langPack.confirmCreate }}</button>
           </div>
@@ -2229,6 +2260,7 @@
     </div>
 
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="/static/manual-create.js"></script>
     <script>
       const { createApp } = Vue;
 
@@ -2258,9 +2290,19 @@
             createDialog: {
               open: false,
               name: "",
+              source: "snapshot",
+              imageId: null,
               serverType: "",
               preferredLocation: "",
               allowFallback: true,
+              sshKeyId: null,
+            },
+            createCatalog: {
+              snapshots: [],
+              systemImages: [],
+              serverTypes: [],
+              locations: [],
+              sshKeys: [],
             },
             serverFilter: "",
             serverSort: "outbound_desc",
@@ -2514,13 +2556,20 @@
                 rebuildStarted: "Rebuild started, new IP: ",
                 notCreated: "Not created",
                 createFromSnapshot: "Create from snapshot",
+                createServer: "Create server",
                 creatingServer: "Creating...",
                 createConfirm: "Create server {name} from its configured snapshot now?",
                 createFailed: "Create failed",
                 createSuccess: "Server created, new IP: ",
                 chooseWhenCreating: "Choose when creating",
-                createDialogTitle: "Create server {name} from snapshot",
-                createDialogIntro: "Choose the server type and preferred location for this creation.",
+                createDialogTitle: "Create server {name}",
+                createDialogIntro: "Choose a live Hetzner image, server type, and preferred location.",
+                createSource: "Creation source",
+                createSourceSnapshot: "Selected snapshot",
+                createSourceSystem: "Official system image",
+                createSnapshot: "Snapshot",
+                createSystemImage: "System image",
+                createSshKey: "SSH key",
                 createServerType: "Server type",
                 createPreferredLocation: "Preferred location",
                 createAllowFallback: "If the preferred location has no capacity, try the other configured locations.",
@@ -2647,13 +2696,20 @@
                 rebuildStarted: "重建已开始，新 IP: ",
                 notCreated: "未创建",
                 createFromSnapshot: "从快照创建",
+                createServer: "创建服务器",
                 creatingServer: "创建中…",
                 createConfirm: "确定使用配置的快照创建 {name} 号机？",
                 createFailed: "创建失败",
                 createSuccess: "服务器创建成功，新 IP: ",
                 chooseWhenCreating: "创建时选择",
-                createDialogTitle: "从快照创建 {name} 号机",
-                createDialogIntro: "请选择本次创建使用的服务器规格和首选地区。",
+                createDialogTitle: "创建 {name} 号机",
+                createDialogIntro: "请选择 Hetzner 当前可用的镜像、服务器规格和首选地区。",
+                createSource: "创建来源",
+                createSourceSnapshot: "从指定快照创建",
+                createSourceSystem: "从官方系统镜像全新创建",
+                createSnapshot: "快照",
+                createSystemImage: "官方系统镜像",
+                createSshKey: "SSH 密钥",
                 createServerType: "服务器规格",
                 createPreferredLocation: "首选地区",
                 createAllowFallback: "首选地区无容量时，继续尝试配置中的其他地区。",
@@ -2727,10 +2783,30 @@
             if (!this.createDialog.allowFallback) return [preferred];
             return [
               preferred,
-              ...(this.manualCreateOptions.locations || []).filter(
+              ...(this.createCatalog.locations || []).filter(
                 (location) => location !== preferred
               ),
             ];
+          },
+          createImageOptions() {
+            return this.createDialog.source === "system"
+              ? (this.createCatalog.systemImages || [])
+              : (this.createCatalog.snapshots || []);
+          },
+          createCompatibleServerTypes() {
+            return ManualCreate.compatibleServerTypes(
+              this.createCatalog,
+              this.createDialog.source,
+              this.createDialog.imageId
+            );
+          },
+          createCanSubmit() {
+            return Boolean(
+              this.createDialog.imageId &&
+              this.createDialog.serverType &&
+              this.createDialog.preferredLocation &&
+              (this.createDialog.source !== "system" || this.createDialog.sshKeyId)
+            );
           },
           qbCompareRows() {
             const rows = (this.servers || []).map((s) => ({ ...s }));
@@ -4239,7 +4315,38 @@
           isCreatingServer(name) {
             return this.creatingServerNames.includes(String(name));
           },
-          openCreateDialog(name) {
+          formatCreateServerType(serverType) {
+            const name = String(serverType?.name || "").toUpperCase();
+            const cores = Number(serverType?.cores || 0);
+            const memory = Number(serverType?.memory || 0);
+            if (!cores || !memory) return name;
+            return `${name} · ${cores} vCPU / ${memory} GB`;
+          },
+          selectCompatibleCreateType() {
+            const types = ManualCreate.compatibleServerTypes(
+              this.createCatalog,
+              this.createDialog.source,
+              this.createDialog.imageId
+            );
+            if (!types.some((row) => row.name === this.createDialog.serverType)) {
+              this.createDialog.serverType = types[0]?.name || "";
+            }
+          },
+          onCreateSourceChange() {
+            const images = this.createDialog.source === "system"
+              ? this.createCatalog.systemImages
+              : this.createCatalog.snapshots;
+            const defaultSnapshotId = this.createCatalog.defaultImageId;
+            const defaultImage = this.createDialog.source === "snapshot"
+              ? images.find((row) => Number(row.id) === Number(defaultSnapshotId))
+              : images[0];
+            this.createDialog.imageId = Number((defaultImage || images[0] || {}).id) || null;
+            this.selectCompatibleCreateType();
+          },
+          onCreateImageChange() {
+            this.selectCompatibleCreateType();
+          },
+          async openCreateDialog(name) {
             if (this.demoMode) {
               alert(this.langPack.demoActionDisabled);
               return;
@@ -4249,15 +4356,31 @@
               alert(`${this.langPack.createFailed}: ${this.langPack.rebuildUnknownError}`);
               return;
             }
-            const serverTypes = options.server_types || [];
-            const locations = options.locations || [];
-            this.createDialog = {
-              open: true,
-              name: String(name),
-              serverType: options.default_server_type || serverTypes[0] || "",
-              preferredLocation: options.default_location || locations[0] || "",
-              allowFallback: true,
-            };
+            try {
+              const res = await fetch(`/api/create_catalog?name=${encodeURIComponent(name)}`, {
+                headers: this.authHeader(),
+              });
+              const data = await res.json();
+              if (!res.ok) {
+                alert(`${this.langPack.createFailed}: ${data.error || this.langPack.rebuildUnknownError}`);
+                return;
+              }
+              const catalog = ManualCreate.normalizeCatalog(data);
+              this.createCatalog = catalog;
+              this.createDialog = {
+                open: true,
+                name: catalog.name,
+                source: catalog.defaultSource,
+                imageId: catalog.defaultImageId,
+                serverType: catalog.defaultServerType,
+                preferredLocation: catalog.defaultLocation,
+                allowFallback: true,
+                sshKeyId: catalog.sshKeyIds[0] || null,
+              };
+              this.selectCompatibleCreateType();
+            } catch (e) {
+              alert(this.langPack.networkError);
+            }
           },
           closeCreateDialog() {
             if (this.isCreatingServer(this.createDialog.name)) return;
@@ -4271,12 +4394,15 @@
               const res = await fetch("/api/create_missing", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", ...this.authHeader() },
-                body: JSON.stringify({
+                body: JSON.stringify(ManualCreate.buildPayload({
                   name: serverName,
-                  server_type: this.createDialog.serverType,
-                  preferred_location: this.createDialog.preferredLocation,
-                  allow_fallback: this.createDialog.allowFallback,
-                }),
+                  source: this.createDialog.source,
+                  imageId: this.createDialog.imageId,
+                  serverType: this.createDialog.serverType,
+                  location: this.createDialog.preferredLocation,
+                  allowFallback: this.createDialog.allowFallback,
+                  sshKeyIds: this.createDialog.sshKeyId ? [this.createDialog.sshKeyId] : [],
+                })),
               });
               const data = await res.json();
               if (!res.ok) {
