@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 SOURCE = Path(__file__).with_name("production-main.py")
@@ -122,3 +123,23 @@ def test_tracking_start_keeps_an_override_inside_available_history():
     result = main._compute_tracking_totals(hourly, "2026-07-28 09:30")
 
     assert result["start"] == "2026-07-28 09:30"
+
+
+def test_compose_mounts_mutable_state_as_one_directory():
+    compose_path = Path(__file__).with_name("docker-compose.yml")
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    service = compose["services"]["hetzner-web"]
+
+    assert service["environment"]["REPORT_STATE_PATH"] == "/app/state/report_state.json"
+    assert service["environment"]["REPORT_STATE_BACKUP_DIR"] == "/app/state/report_state_backups"
+    assert service["environment"]["THRESHOLD_STATE_PATH"] == "/app/state/threshold_state.json"
+    assert "./state:/app/state" in service["volumes"]
+    assert all(
+        not volume.endswith(container_path)
+        for volume in service["volumes"]
+        for container_path in (
+            ":/app/report_state.json",
+            ":/app/report_state_backups",
+            ":/app/threshold_state.json",
+        )
+    )
