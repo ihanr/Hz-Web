@@ -45,6 +45,12 @@ class ReportStateError(RuntimeError):
     pass
 
 
+class ManualCreateCatalogError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -1049,6 +1055,141 @@ def _manual_create_options(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_manual_create_catalog(
+    name: str, config: Dict[str, Any], client: "HetznerClient"
+) -> Dict[str, Any]:
+    server_name = str(name or "").strip()
+    rebuild_cfg = config.get("rebuild") or {}
+    options = _manual_create_options(config)
+    if not options["enabled"]:
+        raise ManualCreateCatalogError("manual_create_disabled", "手动创建未启用")
+
+    snapshot_map = rebuild_cfg.get("snapshot_id_map") or {}
+    mapped_snapshot_id = snapshot_map.get(server_name) if isinstance(snapshot_map, dict) else None
+    if not server_name or not mapped_snapshot_id:
+        raise ManualCreateCatalogError(
+            "name_not_allowed", "该服务器名称不在手动创建白名单中"
+        )
+
+    existing_names = {
+        str(server.get("name") or "").strip() for server in client.get_servers()
+    }
+    if server_name in existing_names:
+        raise ManualCreateCatalogError(
+            "already_exists", f"服务器 {server_name} 已存在，已取消创建"
+        )
+
+    def normalized_image(image: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if image.get("status") != "available" or image.get("deprecated"):
+            return None
+        try:
+            image_id = int(image.get("id"))
+        except (TypeError, ValueError):
+            return None
+        architecture = str(image.get("architecture") or "").strip().lower()
+        name_value = str(image.get("name") or "").strip()
+        description = str(image.get("description") or "").strip()
+        try:
+            disk_size = int(image.get("disk_size") or 0)
+        except (TypeError, ValueError):
+            disk_size = 0
+        return {
+            "id": image_id,
+            "name": name_value,
+            "description": description,
+            "label": description or name_value or str(image_id),
+            "architecture": architecture,
+            "disk_size": disk_size,
+            "created": str(image.get("created") or ""),
+        }
+
+    snapshots = [
+        row
+        for image in client.get_images("snapshot")
+        if (row := normalized_image(image)) is not None
+    ]
+    snapshots.sort(key=lambda row: row["created"], reverse=True)
+    try:
+        default_snapshot_id = int(mapped_snapshot_id)
+    except (TypeError, ValueError):
+        raise ManualCreateCatalogError("invalid_snapshot_id", "配置的快照 ID 无效")
+
+    default_snapshot = next(
+        (row for row in snapshots if row["id"] == default_snapshot_id), None
+    )
+    compatible_architecture = (
+        str(default_snapshot.get("architecture") or "").lower()
+        if default_snapshot
+        else ""
+    )
+
+    def normalized_server_type(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if item.get("deprecated"):
+            return None
+        type_name = str(item.get("name") or "").strip().lower()
+        architecture = str(item.get("architecture") or "").strip().lower()
+        if not type_name or (
+            compatible_architecture and architecture != compatible_architecture
+        ):
+            return None
+        try:
+            cores = int(item.get("cores") or 0)
+            memory = float(item.get("memory") or 0)
+            disk = int(item.get("disk") or 0)
+        except (TypeError, ValueError):
+            return None
+        return {
+            "name": type_name,
+            "architecture": architecture,
+            "cores": cores,
+            "memory": memory,
+            "disk": disk,
+        }
+
+    server_types = [
+        row
+        for item in client.get_server_types()
+        if (row := normalized_server_type(item)) is not None
+    ]
+
+    system_images = [
+        row
+        for image in client.get_images("system")
+        if (row := normalized_image(image)) is not None
+        and (
+            not compatible_architecture
+            or row["architecture"] == compatible_architecture
+        )
+    ]
+
+    ssh_keys: List[Dict[str, Any]] = []
+    for item in client.get_ssh_keys():
+        try:
+            key_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        ssh_keys.append(
+            {
+                "id": key_id,
+                "name": str(item.get("name") or "").strip(),
+                "fingerprint": str(item.get("fingerprint") or "").strip(),
+            }
+        )
+
+    return {
+        "name": server_name,
+        "default_source": "snapshot",
+        "default_snapshot_id": default_snapshot_id,
+        "snapshots": snapshots,
+        "system_images": system_images,
+        "server_types": server_types,
+        "locations": options["locations"],
+        "default_server_type": options["default_server_type"],
+        "default_location": options["default_location"],
+        "ssh_keys": ssh_keys,
+    }
+
+
 def _hetzner_http_error(exc: Exception) -> Dict[str, Any]:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -1234,6 +1375,20 @@ class HetznerClient:
             return snapshots
         except Exception:
             return []
+
+    def get_images(self, image_type: str) -> List[Dict[str, Any]]:
+        normalized_type = str(image_type or "").strip().lower()
+        if normalized_type not in {"snapshot", "system"}:
+            raise ValueError("unsupported_image_type")
+        return self._request_paginated(
+            "images", "images", params={"type": normalized_type}
+        )
+
+    def get_server_types(self) -> List[Dict[str, Any]]:
+        return self._request_paginated("server_types", "server_types")
+
+    def get_ssh_keys(self) -> List[Dict[str, Any]]:
+        return self._request_paginated("ssh_keys", "ssh_keys")
 
     def create_snapshot(self, server_id: int, description: str = "") -> Optional[Dict[str, Any]]:
         try:
