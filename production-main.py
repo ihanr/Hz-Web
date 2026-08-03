@@ -4,13 +4,13 @@ import base64
 import hmac
 import json
 import os
-import shutil
 import socket
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 import yaml
@@ -26,7 +26,7 @@ WEB_CONFIG_PATH = os.environ.get("WEB_CONFIG_PATH", "/app/web_config.json")
 THRESHOLD_STATE_PATH = os.environ.get("THRESHOLD_STATE_PATH", "/app/threshold_state.json")
 REPORT_STATE_PATH = os.environ.get("REPORT_STATE_PATH", "/app/report_state.json")
 REPORT_STATE_BACKUP_DIR = os.environ.get("REPORT_STATE_BACKUP_DIR", "/app/report_state_backups")
-REPORT_STATE_BACKUP_KEEP = 3
+REPORT_STATE_BACKUP_KEEP = 7
 
 ALERT_STATE: Dict[str, Dict[str, Optional[float]]] = {}
 REBUILD_LOCKS: Dict[str, threading.Lock] = {}
@@ -38,6 +38,11 @@ CF_RETRY_ATTEMPTS = 3
 CF_RETRY_DELAY_SECONDS = 5
 CF_REBUILD_SYNC_DELAY_SECONDS = 90
 CF_VERIFY_DELAY_SECONDS = 120
+REPORT_STATE_LOCK = threading.RLock()
+
+
+class ReportStateError(RuntimeError):
+    pass
 
 
 def _load_yaml(path: str) -> Dict[str, Any]:
@@ -58,10 +63,36 @@ def _load_json(path: str) -> Dict[str, Any]:
 
 
 def _save_json(path: str, data: Dict[str, Any]) -> None:
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, path)
+    _atomic_write_json(path, data)
+
+
+def _atomic_write_json(path: str, data: Dict[str, Any]) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(parent, os.O_RDONLY)
+        except (AttributeError, OSError):
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def _load_threshold_state() -> Dict[str, int]:
@@ -101,33 +132,85 @@ def _now_local() -> datetime:
     return datetime.now().astimezone()
 
 
-def _load_report_state() -> Dict[str, Any]:
+def _read_json_object(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    if not isinstance(state, dict):
+        raise ValueError(f"JSON root is not an object: {path}")
+    return state
+
+
+def _report_state_backup_paths() -> List[str]:
+    if not os.path.isdir(REPORT_STATE_BACKUP_DIR):
+        return []
+    return sorted(
+        (
+            os.path.join(REPORT_STATE_BACKUP_DIR, name)
+            for name in os.listdir(REPORT_STATE_BACKUP_DIR)
+            if name.startswith("report_state.json.bak.")
+            and os.path.isfile(os.path.join(REPORT_STATE_BACKUP_DIR, name))
+        ),
+        reverse=True,
+    )
+
+
+def _load_report_state_unlocked() -> Dict[str, Any]:
     if not os.path.exists(REPORT_STATE_PATH):
         return {}
     try:
-        with open(REPORT_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        return _read_json_object(REPORT_STATE_PATH)
+    except Exception as active_error:
+        for backup_path in _report_state_backup_paths():
+            try:
+                recovered = _read_json_object(backup_path)
+                print(f"[alert] report state recovered from backup: {backup_path}")
+                return recovered
+            except Exception:
+                continue
+        raise ReportStateError(
+            f"report state is invalid and no valid backup is available: {active_error}"
+        ) from active_error
+
+
+def _load_report_state() -> Dict[str, Any]:
+    with REPORT_STATE_LOCK:
+        return _load_report_state_unlocked()
+
+
+def _save_report_state_unlocked(state: Dict[str, Any]) -> None:
+    _backup_report_state()
+    _atomic_write_json(REPORT_STATE_PATH, state)
 
 
 def _save_report_state(state: Dict[str, Any]) -> None:
-    _backup_report_state()
-    with open(REPORT_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
+    with REPORT_STATE_LOCK:
+        _save_report_state_unlocked(state)
+
+
+def _update_report_state(mutator: Callable[[Dict[str, Any]], Any]) -> Any:
+    with REPORT_STATE_LOCK:
+        state = _load_report_state_unlocked()
+        result = mutator(state)
+        _save_report_state_unlocked(state)
+        return result
 
 
 def _backup_report_state() -> None:
     if not os.path.exists(REPORT_STATE_PATH):
         return
     try:
+        active_state = _read_json_object(REPORT_STATE_PATH)
         os.makedirs(REPORT_STATE_BACKUP_DIR, exist_ok=True)
         ts = _now_local().strftime("%Y%m%d")
         filename = f"report_state.json.bak.{ts}"
         dst = os.path.join(REPORT_STATE_BACKUP_DIR, filename)
         if os.path.exists(dst):
-            return
-        shutil.copyfile(REPORT_STATE_PATH, dst)
+            try:
+                _read_json_object(dst)
+                return
+            except Exception:
+                pass
+        _atomic_write_json(dst, active_state)
         backups = sorted(
             name
             for name in os.listdir(REPORT_STATE_BACKUP_DIR)
@@ -187,22 +270,34 @@ def _backfill_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _record_rebuild_event(server_id: int, server_name: str, source: str) -> None:
-    state = _load_report_state()
-    stats = state.get("rebuild_stats", {}) or {}
-    key = server_name or str(server_id)
-    entry = stats.get(key, {}) or {}
-    entry["count"] = int(entry.get("count") or 0) + 1
-    now = _now_local()
-    entry["last_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    entry["last_time_iso"] = now.isoformat()
-    entry["last_source"] = source
-    entry["last_server_id"] = str(server_id)
-    sources = entry.get("sources", {}) or {}
-    sources[source] = int(sources.get(source) or 0) + 1
-    entry["sources"] = sources
-    stats[key] = entry
-    state["rebuild_stats"] = stats
-    _save_report_state(state)
+    def mutate(state: Dict[str, Any]) -> None:
+        stats = state.get("rebuild_stats", {}) or {}
+        key = server_name or str(server_id)
+        entry = stats.get(key, {}) or {}
+        entry["count"] = int(entry.get("count") or 0) + 1
+        now = _now_local()
+        entry["last_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        entry["last_time_iso"] = now.isoformat()
+        entry["last_source"] = source
+        entry["last_server_id"] = str(server_id)
+        sources = entry.get("sources", {}) or {}
+        sources[source] = int(sources.get(source) or 0) + 1
+        entry["sources"] = sources
+        stats[key] = entry
+        state["rebuild_stats"] = stats
+
+    _update_report_state(mutate)
+
+
+def _parse_rebuild_timestamp(value: Any) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+    local_tz = _now_local().tzinfo
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=local_tz)
+    return parsed.astimezone(local_tz)
 
 
 def _summarize_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -218,9 +313,8 @@ def _summarize_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
         iso = entry.get("last_time_iso")
         if not iso:
             continue
-        try:
-            parsed = datetime.fromisoformat(iso)
-        except Exception:
+        parsed = _parse_rebuild_timestamp(iso)
+        if parsed is None:
             continue
         if last_time is None or parsed > last_time:
             last_time = parsed
@@ -286,6 +380,17 @@ def _normalize_qb_instances(qb_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _qb_login_succeeded(response: Optional[requests.Response]) -> bool:
+    if response is None:
+        return False
+    if response.status_code == 204:
+        return True
+    return (
+        response.status_code == 200
+        and response.text.strip().lower().startswith("ok")
+    )
+
+
 def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str, Any]:
     base_url = str(instance.get("url") or "").rstrip("/")
     name = instance.get("name") or base_url
@@ -324,7 +429,7 @@ def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str,
                 timeout=timeout,
                 verify=verify_ssl,
             )
-            if login.status_code == 200 and login.text.strip().lower().startswith("ok"):
+            if _qb_login_succeeded(login):
                 break
             body = login.text.strip()
             if body:
@@ -335,7 +440,7 @@ def _fetch_qb_instance(instance: Dict[str, Any], counter_mode: str) -> Dict[str,
             last_error = exc
         if attempt + 1 < login_retries:
             time.sleep(login_retry_delay)
-    if not login or login.status_code != 200 or "Ok." not in login.text:
+    if not _qb_login_succeeded(login):
         return {
             "name": name,
             "url": base_url,
@@ -807,6 +912,8 @@ def _compute_tracking_totals(
     start_idx = 0
     start_label = keys[0]
     if start_override:
+        if start_override <= keys[0]:
+            start_override = keys[0]
         for idx, key in enumerate(keys):
             if key >= start_override:
                 start_idx = idx
@@ -1847,8 +1954,13 @@ def _format_hourly_report(hourly: Dict[str, Any], hours: int = 24) -> str:
 
 
 def _build_manual_report(config: Dict[str, Any], client: "HetznerClient") -> str:
+    return _update_report_state(lambda state: _build_manual_report_locked(config, client, state))
+
+
+def _build_manual_report_locked(
+    config: Dict[str, Any], client: "HetznerClient", state: Dict[str, Any]
+) -> str:
     now = _now_local()
-    state = _load_report_state()
     interval_minutes = (config.get("traffic") or {}).get("check_interval", 60)
     _record_hourly_snapshot(state, now, client, interval_minutes)
 
@@ -1911,7 +2023,6 @@ def _build_manual_report(config: Dict[str, Any], client: "HetznerClient") -> str
     parts.append(_format_hourly_report(state.get("hourly", {})))
     state["last_time"] = now.strftime("%Y-%m-%d %H:%M")
     state["servers"] = current_snapshot
-    _save_report_state(state)
     return "\n\n".join(parts)
 
 def _perform_rebuild(
@@ -2574,6 +2685,34 @@ def _daily_report_loop() -> None:
         time.sleep(30)
 
 
+def _store_traffic_snapshot(config: Dict[str, Any], client: "HetznerClient") -> None:
+    def mutate(state: Dict[str, Any]) -> None:
+        interval_minutes = (config.get("traffic") or {}).get("check_interval", 5)
+        now = _now_local()
+        _record_hourly_snapshot(state, now, client, interval_minutes)
+        hourly = state.get("hourly", {})
+        if len(hourly) == 1:
+            interval = max(1, min(60, int(interval_minutes)))
+            bucket_minute = (now.minute // interval) * interval
+            bucket_time = now.replace(minute=bucket_minute, second=0, microsecond=0)
+            curr_key = (
+                bucket_time.strftime("%Y-%m-%d %H:00")
+                if interval >= 60
+                else bucket_time.strftime("%Y-%m-%d %H:%M")
+            )
+            prev_time = bucket_time - timedelta(minutes=interval)
+            prev_key = (
+                prev_time.strftime("%Y-%m-%d %H:00")
+                if interval >= 60
+                else prev_time.strftime("%Y-%m-%d %H:%M")
+            )
+            if curr_key in hourly and prev_key not in hourly:
+                hourly[prev_key] = hourly[curr_key]
+                state["hourly"] = hourly
+
+    _update_report_state(mutate)
+
+
 def _snapshot_loop() -> None:
     while True:
         try:
@@ -2583,30 +2722,7 @@ def _snapshot_loop() -> None:
                 time.sleep(60)
                 continue
             client = HetznerClient(token)
-            state = _load_report_state()
-            interval_minutes = (config.get("traffic") or {}).get("check_interval", 5)
-            now = _now_local()
-            _record_hourly_snapshot(state, now, client, interval_minutes)
-            hourly = state.get("hourly", {})
-            if len(hourly) == 1:
-                interval = max(1, min(60, int(interval_minutes)))
-                bucket_minute = (now.minute // interval) * interval
-                bucket_time = now.replace(minute=bucket_minute, second=0, microsecond=0)
-                curr_key = (
-                    bucket_time.strftime("%Y-%m-%d %H:00")
-                    if interval >= 60
-                    else bucket_time.strftime("%Y-%m-%d %H:%M")
-                )
-                prev_time = bucket_time - timedelta(minutes=interval)
-                prev_key = (
-                    prev_time.strftime("%Y-%m-%d %H:00")
-                    if interval >= 60
-                    else prev_time.strftime("%Y-%m-%d %H:%M")
-                )
-                if curr_key in hourly and prev_key not in hourly:
-                    hourly[prev_key] = hourly[curr_key]
-                    state["hourly"] = hourly
-            _save_report_state(state)
+            _store_traffic_snapshot(config, client)
         except Exception as e:
             print(f"[alert] snapshot error: {e}")
         time.sleep(300)
@@ -2849,7 +2965,7 @@ def _handle_bot_command(text: str, config: Dict[str, Any], client: "HetznerClien
         return f"📋 上次汇报时间: {last_time}" if last_time else "📋 暂无汇报记录"
 
     if command == "/reportreset":
-        _save_report_state({})
+        _update_report_state(lambda state: state.clear())
         return "♻️ 已重置汇报区间"
 
     if command == "/dnstest":
@@ -3297,11 +3413,11 @@ def _start_traffic_monitor() -> None:
         print(f"[alert] threshold state load failed: {e}")
     def _backfill_wrapper() -> None:
         try:
-            state = _load_report_state()
-            if state.get("rebuild_backfilled"):
-                return
-            state = _backfill_rebuild_stats(state)
-            _save_report_state(state)
+            def backfill(state: Dict[str, Any]) -> None:
+                if not state.get("rebuild_backfilled"):
+                    _backfill_rebuild_stats(state)
+
+            _update_report_state(backfill)
         except Exception as e:
             print(f"[alert] rebuild backfill error: {e}")
 
@@ -3411,7 +3527,7 @@ def api_servers(request: Request) -> JSONResponse:
                 "inbound_bytes": ingoing,
             }
         )
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     web_cfg = _load_json(WEB_CONFIG_PATH)
     hourly = _merge_hourly_series(state.get("hourly", {}))
     tracking = _compute_tracking_totals(hourly, web_cfg.get("tracking_start"))
@@ -3537,7 +3653,7 @@ async def api_dns_check(request: Request) -> JSONResponse:
 @app.get("/api/hourly")
 def api_hourly(request: Request, date: Optional[str] = None) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     name_map = _active_server_name_map(config)
@@ -3595,7 +3711,7 @@ def api_hourly(request: Request, date: Optional[str] = None) -> JSONResponse:
 @app.get("/api/daily")
 def api_daily(request: Request) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     name_map = _active_server_name_map(config)
@@ -3669,7 +3785,7 @@ def api_daily(request: Request) -> JSONResponse:
 @app.get("/api/cycle")
 def api_cycle(request: Request) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     client = HetznerClient(config["hetzner"]["api_token"])

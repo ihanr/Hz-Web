@@ -6,12 +6,12 @@ services:
     environment:
       TZ: Asia/Shanghai
       HETZNER_WEB_DISABLE_WORKERS: "false"
-      REPORT_STATE_BACKUP_DIR: /app/report_state_backups
+      REPORT_STATE_PATH: /app/state/report_state.json
+      REPORT_STATE_BACKUP_DIR: /app/state/report_state_backups
+      THRESHOLD_STATE_PATH: /app/state/threshold_state.json
     ports:
       - "1227:1227"
     volumes:
       - ./config.yaml:/app/config.yaml
-      - ./report_state.json:/app/report_state.json
-      - ./report_state_backups:/app/report_state_backups
-      - ./threshold_state.json:/app/threshold_state.json
+      - ./state:/app/state
       - ./web_config.json:/app/web_config.json:ro

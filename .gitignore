@@ -5,6 +5,7 @@ web_config.json
 report_state.json
 report_state_backups/
 threshold_state.json
+state/
 *.pem
 *.key
 
