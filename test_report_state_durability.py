@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -56,3 +57,68 @@ def test_load_report_state_refuses_silent_reset_without_valid_backup(tmp_path):
     error_type = getattr(main, "ReportStateError", RuntimeError)
     with pytest.raises(error_type):
         main._load_report_state()
+
+
+def test_concurrent_rebuild_events_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    configure_paths(tmp_path)
+    write_json(Path(main.REPORT_STATE_PATH), {"rebuild_stats": {}})
+    original_load = main._load_report_state
+    both_loaded = threading.Barrier(2)
+
+    def synchronized_load():
+        state = original_load()
+        both_loaded.wait(timeout=3)
+        return state
+
+    monkeypatch.setattr(main, "_load_report_state", synchronized_load)
+    errors = []
+
+    def record(server_id: int, name: str) -> None:
+        try:
+            main._record_rebuild_event(server_id, name, "test")
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=record, args=(1, "1")),
+        threading.Thread(target=record, args=(2, "2")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    state = json.loads(Path(main.REPORT_STATE_PATH).read_text(encoding="utf-8"))
+    assert set(state["rebuild_stats"]) == {"1", "2"}
+
+
+def test_tracking_start_does_not_predate_available_history():
+    hourly = {
+        "2026-07-28 09:25": {
+            "1": {"name": "1", "outbound_bytes": 100, "inbound_bytes": 20}
+        },
+        "2026-07-28 09:30": {
+            "1": {"name": "1", "outbound_bytes": 150, "inbound_bytes": 30}
+        },
+    }
+
+    result = main._compute_tracking_totals(hourly, "2026-07-01 00:00")
+
+    assert result == {
+        "start": "2026-07-28 09:25",
+        "outbound_tb": "0.000",
+        "inbound_tb": "0.000",
+    }
+
+
+def test_tracking_start_keeps_an_override_inside_available_history():
+    hourly = {
+        "2026-07-28 09:25": {},
+        "2026-07-28 09:30": {},
+        "2026-07-28 09:35": {},
+    }
+
+    result = main._compute_tracking_totals(hourly, "2026-07-28 09:30")
+
+    assert result["start"] == "2026-07-28 09:30"

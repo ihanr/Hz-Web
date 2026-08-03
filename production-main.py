@@ -267,22 +267,23 @@ def _backfill_rebuild_stats(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _record_rebuild_event(server_id: int, server_name: str, source: str) -> None:
-    state = _load_report_state()
-    stats = state.get("rebuild_stats", {}) or {}
-    key = server_name or str(server_id)
-    entry = stats.get(key, {}) or {}
-    entry["count"] = int(entry.get("count") or 0) + 1
-    now = _now_local()
-    entry["last_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    entry["last_time_iso"] = now.isoformat()
-    entry["last_source"] = source
-    entry["last_server_id"] = str(server_id)
-    sources = entry.get("sources", {}) or {}
-    sources[source] = int(sources.get(source) or 0) + 1
-    entry["sources"] = sources
-    stats[key] = entry
-    state["rebuild_stats"] = stats
-    _save_report_state(state)
+    def mutate(state: Dict[str, Any]) -> None:
+        stats = state.get("rebuild_stats", {}) or {}
+        key = server_name or str(server_id)
+        entry = stats.get(key, {}) or {}
+        entry["count"] = int(entry.get("count") or 0) + 1
+        now = _now_local()
+        entry["last_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        entry["last_time_iso"] = now.isoformat()
+        entry["last_source"] = source
+        entry["last_server_id"] = str(server_id)
+        sources = entry.get("sources", {}) or {}
+        sources[source] = int(sources.get(source) or 0) + 1
+        entry["sources"] = sources
+        stats[key] = entry
+        state["rebuild_stats"] = stats
+
+    _update_report_state(mutate)
 
 
 def _parse_rebuild_timestamp(value: Any) -> Optional[datetime]:
@@ -908,6 +909,8 @@ def _compute_tracking_totals(
     start_idx = 0
     start_label = keys[0]
     if start_override:
+        if start_override <= keys[0]:
+            start_override = keys[0]
         for idx, key in enumerate(keys):
             if key >= start_override:
                 start_idx = idx
@@ -1948,8 +1951,13 @@ def _format_hourly_report(hourly: Dict[str, Any], hours: int = 24) -> str:
 
 
 def _build_manual_report(config: Dict[str, Any], client: "HetznerClient") -> str:
+    return _update_report_state(lambda state: _build_manual_report_locked(config, client, state))
+
+
+def _build_manual_report_locked(
+    config: Dict[str, Any], client: "HetznerClient", state: Dict[str, Any]
+) -> str:
     now = _now_local()
-    state = _load_report_state()
     interval_minutes = (config.get("traffic") or {}).get("check_interval", 60)
     _record_hourly_snapshot(state, now, client, interval_minutes)
 
@@ -2012,7 +2020,6 @@ def _build_manual_report(config: Dict[str, Any], client: "HetznerClient") -> str
     parts.append(_format_hourly_report(state.get("hourly", {})))
     state["last_time"] = now.strftime("%Y-%m-%d %H:%M")
     state["servers"] = current_snapshot
-    _save_report_state(state)
     return "\n\n".join(parts)
 
 def _perform_rebuild(
@@ -2675,6 +2682,34 @@ def _daily_report_loop() -> None:
         time.sleep(30)
 
 
+def _store_traffic_snapshot(config: Dict[str, Any], client: "HetznerClient") -> None:
+    def mutate(state: Dict[str, Any]) -> None:
+        interval_minutes = (config.get("traffic") or {}).get("check_interval", 5)
+        now = _now_local()
+        _record_hourly_snapshot(state, now, client, interval_minutes)
+        hourly = state.get("hourly", {})
+        if len(hourly) == 1:
+            interval = max(1, min(60, int(interval_minutes)))
+            bucket_minute = (now.minute // interval) * interval
+            bucket_time = now.replace(minute=bucket_minute, second=0, microsecond=0)
+            curr_key = (
+                bucket_time.strftime("%Y-%m-%d %H:00")
+                if interval >= 60
+                else bucket_time.strftime("%Y-%m-%d %H:%M")
+            )
+            prev_time = bucket_time - timedelta(minutes=interval)
+            prev_key = (
+                prev_time.strftime("%Y-%m-%d %H:00")
+                if interval >= 60
+                else prev_time.strftime("%Y-%m-%d %H:%M")
+            )
+            if curr_key in hourly and prev_key not in hourly:
+                hourly[prev_key] = hourly[curr_key]
+                state["hourly"] = hourly
+
+    _update_report_state(mutate)
+
+
 def _snapshot_loop() -> None:
     while True:
         try:
@@ -2684,30 +2719,7 @@ def _snapshot_loop() -> None:
                 time.sleep(60)
                 continue
             client = HetznerClient(token)
-            state = _load_report_state()
-            interval_minutes = (config.get("traffic") or {}).get("check_interval", 5)
-            now = _now_local()
-            _record_hourly_snapshot(state, now, client, interval_minutes)
-            hourly = state.get("hourly", {})
-            if len(hourly) == 1:
-                interval = max(1, min(60, int(interval_minutes)))
-                bucket_minute = (now.minute // interval) * interval
-                bucket_time = now.replace(minute=bucket_minute, second=0, microsecond=0)
-                curr_key = (
-                    bucket_time.strftime("%Y-%m-%d %H:00")
-                    if interval >= 60
-                    else bucket_time.strftime("%Y-%m-%d %H:%M")
-                )
-                prev_time = bucket_time - timedelta(minutes=interval)
-                prev_key = (
-                    prev_time.strftime("%Y-%m-%d %H:00")
-                    if interval >= 60
-                    else prev_time.strftime("%Y-%m-%d %H:%M")
-                )
-                if curr_key in hourly and prev_key not in hourly:
-                    hourly[prev_key] = hourly[curr_key]
-                    state["hourly"] = hourly
-            _save_report_state(state)
+            _store_traffic_snapshot(config, client)
         except Exception as e:
             print(f"[alert] snapshot error: {e}")
         time.sleep(300)
@@ -2950,7 +2962,7 @@ def _handle_bot_command(text: str, config: Dict[str, Any], client: "HetznerClien
         return f"📋 上次汇报时间: {last_time}" if last_time else "📋 暂无汇报记录"
 
     if command == "/reportreset":
-        _save_report_state({})
+        _update_report_state(lambda state: state.clear())
         return "♻️ 已重置汇报区间"
 
     if command == "/dnstest":
@@ -3398,11 +3410,11 @@ def _start_traffic_monitor() -> None:
         print(f"[alert] threshold state load failed: {e}")
     def _backfill_wrapper() -> None:
         try:
-            state = _load_report_state()
-            if state.get("rebuild_backfilled"):
-                return
-            state = _backfill_rebuild_stats(state)
-            _save_report_state(state)
+            def backfill(state: Dict[str, Any]) -> None:
+                if not state.get("rebuild_backfilled"):
+                    _backfill_rebuild_stats(state)
+
+            _update_report_state(backfill)
         except Exception as e:
             print(f"[alert] rebuild backfill error: {e}")
 
@@ -3512,7 +3524,7 @@ def api_servers(request: Request) -> JSONResponse:
                 "inbound_bytes": ingoing,
             }
         )
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     web_cfg = _load_json(WEB_CONFIG_PATH)
     hourly = _merge_hourly_series(state.get("hourly", {}))
     tracking = _compute_tracking_totals(hourly, web_cfg.get("tracking_start"))
@@ -3638,7 +3650,7 @@ async def api_dns_check(request: Request) -> JSONResponse:
 @app.get("/api/hourly")
 def api_hourly(request: Request, date: Optional[str] = None) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     name_map = _active_server_name_map(config)
@@ -3696,7 +3708,7 @@ def api_hourly(request: Request, date: Optional[str] = None) -> JSONResponse:
 @app.get("/api/daily")
 def api_daily(request: Request) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     name_map = _active_server_name_map(config)
@@ -3770,7 +3782,7 @@ def api_daily(request: Request) -> JSONResponse:
 @app.get("/api/cycle")
 def api_cycle(request: Request) -> JSONResponse:
     _require_auth(request)
-    state = _load_json(REPORT_STATE_PATH)
+    state = _load_report_state()
     hourly = state.get("hourly", {})
     config = _load_yaml(CONFIG_PATH)
     client = HetznerClient(config["hetzner"]["api_token"])
