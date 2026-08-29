@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# Hetzner-Web All-in-One Installer (Modular Docker Edition)
+# Hz-Web All-in-One Installer
 # =============================================================================
 
-REPO_URL="${REPO_URL:-https://github.com/liuweiqiang0523/Hetzner-Web.git}"
+REPO_URL="${REPO_URL:-https://github.com/ihanr/Hz-Web.git}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/hetzner-web}"
 ALLOW_UPDATE="${ALLOW_UPDATE:-0}"
@@ -25,7 +25,7 @@ if docker compose version >/dev/null 2>&1; then COMPOSE='docker compose'; else C
 
 # 1. 代码拉取与更新
 if [ ! -d "$INSTALL_DIR" ]; then
-  info "Cloning Hetzner-Web to $INSTALL_DIR..."
+  info "Cloning Hz-Web to $INSTALL_DIR..."
   git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
 elif [ -d "$INSTALL_DIR/.git" ]; then
   if [ "$ALLOW_UPDATE" = "1" ]; then
@@ -44,17 +44,26 @@ if [ ! -f config.yaml ]; then
   cp config.example.yaml config.yaml
 fi
 
+if [ ! -f web_config.json ]; then
+  WEB_USERNAME="${WEB_USERNAME:-admin}"
+  WEB_PASSWORD="${WEB_PASSWORD:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)}"
+  printf '{"username":"%s","password":"%s"}\n' "$WEB_USERNAME" "$WEB_PASSWORD" > web_config.json
+  chmod 600 web_config.json
+  warn "Web login created: ${WEB_USERNAME} / ${WEB_PASSWORD}"
+  warn "Save this password now. It is not shown again by the installer."
+fi
+
 # 3. 环境变量注入
 if [[ -n "${HETZNER_API_TOKEN:-}" ]]; then
   sed -i "s/YOUR_HETZNER_API_TOKEN/${HETZNER_API_TOKEN}/g" config.yaml
 fi
 
 # 4. 启动容器
-info "Building and starting Hetzner-Web containers..."
+info "Building and starting Hz-Web containers..."
 $COMPOSE up -d --build
 
 info "================================================================="
-info "  Successfully installed Hetzner-Web!"
+info "  Successfully installed Hz-Web!"
 info "  Web UI: http://YOUR_SERVER_IP:1227"
 info "  Config: $INSTALL_DIR/config.yaml"
 info "================================================================="

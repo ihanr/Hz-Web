@@ -25,5 +25,5 @@ ENV WEB_CONFIG_PATH=/app/web_config.json
 
 EXPOSE 1227
 
-# 启动新的模块化入口
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "1227"]
+# 生产入口
+CMD ["uvicorn", "production-main:app", "--host", "0.0.0.0", "--port", "1227"]

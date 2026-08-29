@@ -1,243 +1,211 @@
-![Hetzner-Web](docs/brand-logo.svg)
+# Hz-Web
 
-[English](README.md) | [中文](README.zh.md)
+`v2026.08.29`
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-ready-2496ED)](#quick-start)
+Hetzner Cloud 流量监控与管理面板：查看服务器流量、qBittorrent 统计、Cloudflare DNS 状态，并支持 Telegram 通知、快照重建和手动创建缺失服务器。
 
-A lightweight Hetzner traffic dashboard + automation monitor. Includes a web UI, Telegram alerts/commands, auto rebuilds, and DNS checks.
+> 当前仓库：<https://github.com/ihanr/Hz-Web>
 
-## Table of Contents
+## 安装
 
-- [Quick Start](#quick-start)
-- [Screenshots](#screenshots)
-- [Highlights](#highlights)
-- [Use Cases](#use-cases)
-- [Install Options](#install-options)
-- [Prerequisites](#prerequisites)
-- [Config Setup](#config-setup)
-- [Telegram Setup](#telegram-setup)
-- [Config File Locations](#config-file-locations)
-- [Troubleshooting](#troubleshooting)
-- [Project Layout](#project-layout)
-- [GitHub Collaboration](#github-collaboration)
-- [FAQ](#faq)
-- [Security Notes](#security-notes)
+要求：一台 Linux 服务器、Docker Engine 与 Docker Compose Plugin。Web 默认监听 `1227` 端口，请在防火墙或反向代理中放行该端口。
 
----
+### 一键安装
 
-<a id="quick-start"></a>
-## ![Start](docs/icon-start.svg) Quick Start
-
-If this is your first time, use the all-in-one script to install Web + automation + Telegram support in one go.
+以 root 执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuweiqiang0523/Hetzner-Web/main/scripts/install-all.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ihanr/Hz-Web/main/scripts/install-all.sh | sudo bash
 ```
 
-Then continue with **Config Setup** below.
+脚本会克隆到 `/opt/hetzner-web`，创建 `config.yaml` 和随机 Web 登录密码。终端显示的密码只显示一次，请立即保存。
 
-![Quick Start Flow](docs/quickstart-flow.light.svg)
-
----
-
-<a id="screenshots"></a>
-## ![Camera](docs/icon-camera.svg) Screenshots
-
-![Web Dashboard](docs/web2.png)
-![Telegram Bot](docs/telegram2.png)
-
----
-
-<a id="highlights"></a>
-## ![List](docs/icon-list.svg) Highlights
-
-![Feature Cards](docs/feature-cards.svg)
-
----
-
-<a id="use-cases"></a>
-## ![List](docs/icon-list.svg) Use Cases
-
-![Use Cases](docs/use-cases.svg)
-
-Short and practical: this is built for bandwidth caps, night-time ops, and fast actions from Telegram.
-Use it when you want visibility first, automation second, and manual control always nearby.
-
----
-
-<a id="install-options"></a>
-## ![Install](docs/icon-install.svg) Install Options
-
-Use the all-in-one script to install Web dashboard + traffic monitor in one go:
+已有安装更新：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuweiqiang0523/Hetzner-Web/main/scripts/install-all.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ihanr/Hz-Web/main/scripts/install-all.sh | sudo env ALLOW_UPDATE=1 bash
 ```
 
-Existing deployments are safe. To update an existing install:
+### 手动安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuweiqiang0523/Hetzner-Web/main/scripts/install-all.sh | sudo ALLOW_UPDATE=1 bash
+sudo git clone https://github.com/ihanr/Hz-Web.git /opt/hetzner-web
+cd /opt/hetzner-web
+sudo cp config.example.yaml config.yaml
+sudo chmod 600 config.yaml
+sudo sh -c 'printf "%s\n" "{\"username\":\"admin\",\"password\":\"请替换为高强度密码\"}" > web_config.json'
+sudo chmod 600 web_config.json
+sudo docker compose up -d --build
 ```
 
----
+打开 `http://服务器IP:1227`。公网使用时请放在 HTTPS 反向代理之后。
 
-<a id="prerequisites"></a>
-## ![Check](docs/icon-check.svg) Prerequisites
+### 更新后应用配置
 
-Make sure these commands exist:
-
-```bash
-git --version
-python3 --version
-docker --version
-docker compose version
-systemctl --version
-```
-
-If any are missing, install them first (Ubuntu/Debian: `apt`).
-
----
-
-<a id="config-setup"></a>
-## ![Config](docs/icon-config.svg) Config Setup
-
-**Web config**
-- `config.yaml`: set `hetzner.api_token`
-- `web_config.json`: set `username` / `password` (example defaults are `admin` / `CHANGE_ME`, must change)
-
-**Automation config**
-- `automation/config.yaml`: set Hetzner/Telegram/Cloudflare if needed
-
-**Optional tuning**
-- `cloudflare.update_retries`, `cloudflare.update_retry_delay`, `cloudflare.rebuild_sync_delay_seconds` for DNS retry + post-rebuild sync
-- `qbittorrent.rebuild_cooldown_seconds`, `qbittorrent.instances[].login_retries`, `qbittorrent.instances[].login_retry_delay` for login retry + cooldown
-- Telegram: `/dnsync` to force a DNS sync on demand
-- `report_state.json` is backed up daily to `report_state_backups/` (keeps the latest 3 files)
-
-Apply changes:
+修改 `config.yaml` 或 `web_config.json` 后：
 
 ```bash
 cd /opt/hetzner-web
-
-docker compose up -d --build
-sudo systemctl restart hetzner-web.service
+sudo docker compose up -d --build
+sudo docker compose ps
 ```
 
-Open: `http://<your-server-ip>:1227`
+运行日志：
 
----
+```bash
+sudo docker compose logs -f --tail=100
+```
 
-<a id="telegram-setup"></a>
-## ![Telegram](docs/icon-telegram.svg) Telegram Setup
+## 配置说明
 
-In `automation/config.yaml`:
+配置文件均在 `/opt/hetzner-web/`：
+
+| 文件 | 用途 |
+| --- | --- |
+| `config.yaml` | Hetzner、流量阈值、qB、Telegram、Cloudflare 和重建配置 |
+| `web_config.json` | Web Basic Auth 登录账号与密码 |
+| `state/` | 自动维护的流量和阈值状态；不要删除 |
+
+`config.yaml`、`web_config.json`、密钥和 `state/` 均已在 `.gitignore` 中，不能提交到仓库。
+
+### Web 登录
+
+`web_config.json`：
+
+```json
+{
+  "username": "admin",
+  "password": "替换为高强度密码"
+}
+```
+
+### Hetzner 与流量阈值
+
+```yaml
+hetzner:
+  api_token: "YOUR_HETZNER_API_TOKEN"
+
+traffic:
+  limit_gb: 18432       # 单台服务器出站阈值，GiB
+  check_interval: 5     # 检查间隔，分钟
+  exceed_action: rebuild # 超限操作：rebuild
+```
+
+Hetzner Token 需要本项目服务器、镜像、快照、SSH Key 和 Primary IP 的管理权限。`exceed_action: rebuild` 会按下面的 `rebuild` 配置执行自动重建，请先确认快照和地区回退顺序。
+
+### qBittorrent（可选）
+
+```yaml
+qbittorrent:
+  enabled: true
+  counter_mode: alltime  # alltime 或 session
+  rebuild_cooldown_seconds: 300
+  instances:
+    - name: "1"
+      url: "http://1.example.com:9090"
+      username: "YOUR_QB_USERNAME"
+      password: "YOUR_QB_PASSWORD"
+      verify_ssl: false
+      timeout_seconds: 6
+      login_retries: 3
+      login_retry_delay: 3
+```
+
+`name` 应与 Hetzner 服务器名称一致；`url` 是 qB WebUI 地址。qB 5.2.x 登录状态码已兼容。
+
+### Telegram（可选）
 
 ```yaml
 telegram:
   enabled: true
-  bot_token: "YOUR_BOT_TOKEN"
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
   chat_id: "YOUR_CHAT_ID"
+  notify_levels: [80, 90, 95, 100]
+  daily_report_time: "23:55"
 ```
 
-Then restart automation:
+常用命令：`/status`、`/rebuild <服务器ID>`、`/dnsync`、`/dnscheck <服务器ID>`。
+
+### Cloudflare DNS（可选）
+
+```yaml
+cloudflare:
+  api_token: "YOUR_CLOUDFLARE_API_TOKEN"
+  zone_id: "YOUR_CLOUDFLARE_ZONE_ID"
+  sync_on_start: true
+  update_retries: 3
+  update_retry_delay: 5
+  rebuild_sync_delay_seconds: 90
+  sync_interval_seconds: 180
+  record_map:
+    "1": "1.example.com"
+    "2": "2.example.com"
+```
+
+`record_map` 的键使用服务器名称；重建或手动创建成功后，程序会更新对应 A 记录。
+
+### 重建、地区回退与手动创建
+
+```yaml
+rebuild:
+  mode: snapshot
+  snapshot_id_map:
+    "1": "YOUR_SNAPSHOT_ID"
+    "2": "YOUR_SNAPSHOT_ID"
+  location_fallbacks:
+    - nbg1
+    - fsn1
+    - hel1
+  manual_create:
+    enabled: true
+    server_type: cx33
+    server_types: [cx33, cx43, cx53]
+```
+
+- 自动超限重建始终从快照创建。
+- 依次尝试 `location_fallbacks`；所有地区无容量时只通知，不会自动重复创建。
+- WebUI 中“创建服务器”可选择项目快照或官方系统镜像。系统镜像创建必须选择项目内 SSH Key；镜像、规格、架构和磁盘大小会在创建前再次校验。
+- `snapshot_id_map` 的键使用服务器名称，不是 Hetzner 服务器 ID。
+
+### 定时删除/创建（可选）
+
+```yaml
+scheduler:
+  enabled: false
+  delete_time: "23:50"
+  create_time: "08:00"
+```
+
+启用前请先在测试环境验证快照映射和 DNS 映射；定时删除是不可逆操作。
+
+## 常用检查
 
 ```bash
-sudo systemctl restart hetzner-web.service
+cd /opt/hetzner-web
+sudo docker compose ps
+sudo docker compose logs --tail=100 hetzner-web
+curl -I http://127.0.0.1:1227/
 ```
 
----
+如果页面打不开，先检查容器状态、1227 端口和反向代理；如果 DNS 没更新，检查 Cloudflare Token 的 DNS 编辑权限与 `record_map`。
 
-<a id="config-file-locations"></a>
-## ![Map](docs/icon-map.svg) Config File Locations
+## 升级说明
 
-![Config Files](docs/config-files.light.svg)
+版本采用日期格式：`vYYYY.MM.DD`。本版本为 `v2026.08.29`。
 
-- Web: `/opt/hetzner-web/config.yaml`
-- Web login: `/opt/hetzner-web/web_config.json`
-- Automation: `/opt/hetzner-web/automation/config.yaml`
-
----
-
-<a id="troubleshooting"></a>
-## ![Tools](docs/icon-tools.svg) Troubleshooting
-
-![Troubleshooting Flow](docs/troubleshooting-flow.light.svg)
-
-Quick checks:
-- `docker ps`
-- `sudo systemctl status hetzner-web.service`
-- `sudo journalctl -u hetzner-web.service -n 50 --no-pager`
-
----
-
-<a id="project-layout"></a>
-## ![Layout](docs/icon-layout.svg) Project Layout
-
-- **Web Dashboard** (`app/`): Modular FastAPI architecture
-  - `app/main.py`: Entry point and background task lifecycle
-  - `app/api/`: REST API route definitions
-  - `app/services/`: Integrations (Hetzner, Telegram, Cloudflare, qBittorrent)
-  - `app/tasks/`: Traffic monitoring and scheduling loops
-  - `app/core/`: Configuration and global state
-  - `app/utils/`: Statistics and formatting helpers
-- **Frontend** (`static/`): Compiled Vue assets
-- **Automation Scripts** (`automation/`): Standalone monitor logic (CLI/systemd)
-
----
-
-<a id="github-collaboration"></a>
-## ![Tools](docs/icon-tools.svg) GitHub Collaboration
-
-This repository includes basic GitHub collaboration guardrails:
-
-- CI workflow: `.github/workflows/ci.yml`
-  - Runs Python compile checks on push and pull requests
-- PR template: `.github/pull_request_template.md`
-
-Recommended contributor flow:
+升级前建议备份敏感配置和状态：
 
 ```bash
-git checkout -b feat/your-change
-# edit files
-python3 -m py_compile app/*.py app/*/*.py automation/*.py
-git add .
-git commit -m "feat: your change"
-git push origin feat/your-change
-# then open a PR on GitHub
+cd /opt/hetzner-web
+sudo tar czf hz-web-backup-$(date +%F).tgz config.yaml web_config.json state
 ```
 
----
+## 安全建议
 
-<a id="faq"></a>
-## ![List](docs/icon-list.svg) FAQ
+- 不要把 Token、密码、私钥、`config.yaml` 或 `web_config.json` 上传到 GitHub。
+- Web 面板使用 Basic Auth；公网部署必须使用强密码和 HTTPS。
+- 重建/删除前确认流量阈值、快照、Primary IP 限额和地区回退配置。
 
-Q: The dashboard doesn't open. What should I check first?  
-A: Make sure port `1227` is open and confirm containers are running with `docker ps`.
+## License
 
-Q: Telegram messages are not arriving.  
-A: Verify `bot_token` and `chat_id` in `automation/config.yaml`, then restart the service.
-
-Q: I edited configs but nothing changed.  
-A: Rebuild web with `docker compose up -d --build` and restart automation with `systemctl restart`.
-
-Q: DNS points to the old IP after a rebuild. What should I do?  
-A: Run `/dnsync` or `/dnstest <ID>` in Telegram to force an update, then verify with `/dnscheck <ID>`. If it still points to the old IP, confirm the Cloudflare record exists, token permissions are correct, and the new server has an IPv4 assigned.
-
-Q: Where are my config files stored?  
-A: Web configs live in `/opt/hetzner-web/` and automation config is in `/opt/hetzner-web/automation/`.
-
-Q: Which install should I choose?  
-A: Most users should pick the all-in-one script; only choose web-only or automation-only if you know you need just one.
-
-Q: Can I re-run the install script safely?  
-A: The all-in-one script exits if the install dir exists unless you set `ALLOW_UPDATE=1`.
-
----
-
-<a id="security-notes"></a>
-## ![Shield](docs/icon-shield.svg) Security Notes
-
-- `config.yaml` / `web_config.json` / `automation/config.yaml` are sensitive. Do not commit them.
-- Use HTTPS reverse proxy for public access.
+[MIT](LICENSE.md)

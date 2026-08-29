@@ -1,10 +1,6 @@
 hetzner:
   api_token: "YOUR_HETZNER_API_TOKEN"
 
-web:
-  username: "admin"
-  password: "CHANGE_ME"
-
 traffic:
   limit_gb: 18432
   check_interval: 5
@@ -56,6 +52,14 @@ rebuild:
   snapshot_id_map:
     "SERVER_ID_1": "SNAPSHOT_ID_1"
     "SERVER_ID_2": "SNAPSHOT_ID_2"
+  location_fallbacks:
+    - "nbg1"
+    - "fsn1"
+    - "hel1"
+  manual_create:
+    enabled: false
+    server_type: "cx33"
+    server_types: ["cx33", "cx43", "cx53"]
   fallback_template:
     server_type: "cx43"
     location: "nbg1"
