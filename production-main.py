@@ -1754,7 +1754,8 @@ class HetznerClient:
         new_server: Optional[Dict[str, Any]] = None
         new_location: Optional[str] = None
 
-        for location in locations:
+        create_locations = locations * 5 if len(locations) == 1 else locations
+        for attempt_index, location in enumerate(create_locations):
             create_data = {
                 "name": old_server["name"],
                 "server_type": old_server["server_type"]["name"],
@@ -1778,6 +1779,8 @@ class HetznerClient:
                 error = _hetzner_http_error(exc)
                 if error.get("status") == 412 and error.get("code") == "resource_unavailable":
                     capacity_errors.append({"location": location, **error})
+                    if len(locations) == 1 and attempt_index < len(create_locations) - 1:
+                        time.sleep(60)
                     continue
                 return {
                     "success": False,
@@ -1795,12 +1798,19 @@ class HetznerClient:
 
         if not new_server:
             locations_text = "、".join(attempted_locations)
-            return {
-                "success": False,
-                "error": (
+            if len(locations) == 1:
+                error_text = (
+                    f"{old_server['server_type']['name']} 创建失败："
+                    f"{locations[0]} 连续5次无可用容量；停止重试"
+                )
+            else:
+                error_text = (
                     f"{old_server['server_type']['name']} 创建失败："
                     f"{locations_text} 均无可用容量；未自动重试"
-                ),
+                )
+            return {
+                "success": False,
+                "error": error_text,
                 "error_code": "resource_unavailable",
                 "http_status": 412,
                 "attempted_locations": attempted_locations,

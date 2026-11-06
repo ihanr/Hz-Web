@@ -211,6 +211,45 @@ class RebuildFallbackTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "forbidden")
         self.assertIn("insufficient permissions", result["error"])
 
+    def test_single_location_succeeds_on_fifth_attempt(self):
+        config = self.config()
+        config["rebuild"]["location_fallbacks"] = ["nbg1"]
+        client = FakeClient(
+            [api_error(412, "resource_unavailable", "capacity")] * 4 + [9005]
+        )
+        with patch.object(main.time, "sleep") as sleep:
+            result = client.rebuild_server(444, config)
+        self.assertTrue(result["success"])
+        self.assertEqual(client.deleted, [444])
+        self.assertEqual(client.create_locations, ["nbg1"] * 5)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(60,)] * 4)
+
+    def test_single_location_stops_after_five_capacity_failures(self):
+        config = self.config()
+        config["rebuild"]["location_fallbacks"] = ["nbg1"]
+        client = FakeClient(
+            [api_error(412, "resource_unavailable", "capacity")] * 5
+        )
+        with patch.object(main.time, "sleep") as sleep:
+            result = client.rebuild_server(444, config)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "resource_unavailable")
+        self.assertEqual(client.create_locations, ["nbg1"] * 5)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(60,)] * 4)
+
+    def test_single_location_quota_error_stops_without_retry(self):
+        config = self.config()
+        config["rebuild"]["location_fallbacks"] = ["nbg1"]
+        client = FakeClient(
+            [api_error(403, "resource_limit_exceeded", "shared core limit exceeded")]
+        )
+        with patch.object(main.time, "sleep") as sleep:
+            result = client.rebuild_server(444, config)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "resource_limit_exceeded")
+        self.assertEqual(client.create_locations, ["nbg1"])
+        sleep.assert_not_called()
+
 
 class ResourceReleaseWaitTests(unittest.TestCase):
     def run_wait(self, states, timeout=120.0, poll=3.0):
