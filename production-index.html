@@ -2228,7 +2228,7 @@
               </select>
             </label>
           </div>
-          <label class="create-fallback-check">
+          <label v-if="createCatalog.locations.length > 1" class="create-fallback-check">
             <input type="checkbox" v-model="createDialog.allowFallback">
             <span>{{ langPack.createAllowFallback }}</span>
           </label>
@@ -2238,8 +2238,9 @@
               <strong>{{ createDialog.source === "system" ? langPack.createSourceSystem : langPack.createSourceSnapshot }} · {{ createDialog.serverType.toUpperCase() }} + {{ createDialog.preferredLocation }}</strong>
             </div>
             <div>
-              {{ langPack.createAttemptOrder }}:
-              <strong>{{ createAttemptOrder.join(" → ") }}</strong>
+              {{ createCatalog.locations.length > 1 ? langPack.createAttemptOrder : langPack.createLocationOnly }}:
+              <strong v-if="createCatalog.locations.length > 1">{{ createAttemptOrder.join(" → ") }}</strong>
+              <strong v-else>{{ langPack.createOnly }} {{ createDialog.preferredLocation }}</strong>
             </div>
           </div>
           <div class="create-warning">{{ langPack.createSafetyNote }}</div>
@@ -2575,6 +2576,8 @@
                 createAllowFallback: "If the preferred location has no capacity, try the other configured locations.",
                 createSelected: "Selected",
                 createAttemptOrder: "Attempt order",
+                createLocationOnly: "Creation location",
+                createOnly: "Only",
                 createSafetyNote: "This only creates the missing server. It never deletes or modifies an existing server.",
                 cancel: "Cancel",
                 confirmCreate: "Confirm create",
@@ -2715,6 +2718,8 @@
                 createAllowFallback: "首选地区无容量时，继续尝试配置中的其他地区。",
                 createSelected: "本次选择",
                 createAttemptOrder: "尝试顺序",
+                createLocationOnly: "创建地区",
+                createOnly: "仅",
                 createSafetyNote: "此操作只创建缺失服务器，不会删除或修改任何现有服务器。",
                 cancel: "取消",
                 confirmCreate: "确认创建",
