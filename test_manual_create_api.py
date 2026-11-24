@@ -104,7 +104,8 @@ def test_create_catalog_maps_target_errors(api, monkeypatch):
     assert response.json()["error_code"] == "already_exists"
 
 
-def test_create_endpoint_forwards_dynamic_selection(api, monkeypatch):
+@pytest.mark.parametrize("explicit_fallback", [True, None])
+def test_create_endpoint_forwards_dynamic_selection(api, monkeypatch, explicit_fallback):
     client, headers, _ = api
     captured = {}
 
@@ -113,19 +114,17 @@ def test_create_endpoint_forwards_dynamic_selection(api, monkeypatch):
         return {"success": True, "new_server_id": 9001, "dns": None}
 
     monkeypatch.setattr(main, "_perform_manual_create", fake_perform)
-    response = client.post(
-        "/api/create_missing",
-        headers=headers,
-        json={
-            "name": "2",
-            "source": "system",
-            "image_id": 1001,
-            "server_type": "cx23",
-            "preferred_location": "nbg1",
-            "allow_fallback": True,
-            "ssh_key_ids": [77],
-        },
-    )
+    payload = {
+        "name": "2",
+        "source": "system",
+        "image_id": 1001,
+        "server_type": "cx23",
+        "preferred_location": "nbg1",
+        "ssh_key_ids": [77],
+    }
+    if explicit_fallback is not None:
+        payload["allow_fallback"] = explicit_fallback
+    response = client.post("/api/create_missing", headers=headers, json=payload)
 
     assert response.status_code == 200
     assert captured == {
@@ -134,7 +133,7 @@ def test_create_endpoint_forwards_dynamic_selection(api, monkeypatch):
         "image_id": 1001,
         "server_type": "cx23",
         "preferred_location": "nbg1",
-        "allow_fallback": True,
+        "allow_fallback": explicit_fallback is True,
         "ssh_key_ids": [77],
     }
 

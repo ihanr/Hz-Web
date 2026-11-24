@@ -2238,8 +2238,8 @@
               <strong>{{ createDialog.source === "system" ? langPack.createSourceSystem : langPack.createSourceSnapshot }} · {{ createDialog.serverType.toUpperCase() }} + {{ createDialog.preferredLocation }}</strong>
             </div>
             <div>
-              {{ createCatalog.locations.length > 1 ? langPack.createAttemptOrder : langPack.createLocationOnly }}:
-              <strong v-if="createCatalog.locations.length > 1">{{ createAttemptOrder.join(" → ") }}</strong>
+              {{ createAttemptOrder.length > 1 ? langPack.createAttemptOrder : langPack.createLocationOnly }}:
+              <strong v-if="createAttemptOrder.length > 1">{{ createAttemptOrder.join(" → ") }}</strong>
               <strong v-else>{{ langPack.createOnly }} {{ createDialog.preferredLocation }}</strong>
             </div>
           </div>
@@ -2295,7 +2295,7 @@
               imageId: null,
               serverType: "",
               preferredLocation: "",
-              allowFallback: true,
+              allowFallback: false,
               sshKeyId: null,
             },
             createCatalog: {
@@ -4379,7 +4379,7 @@
                 imageId: catalog.defaultImageId,
                 serverType: catalog.defaultServerType,
                 preferredLocation: catalog.defaultLocation,
-                allowFallback: true,
+                allowFallback: false,
                 sshKeyId: catalog.sshKeyIds[0] || null,
               };
               this.selectCompatibleCreateType();

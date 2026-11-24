@@ -288,19 +288,23 @@ def test_manual_create_rejects_location_outside_allowlist():
 
 
 def test_manual_create_without_fallback_attempts_only_preferred_location():
+    config = manual_config()
+    config["rebuild"]["location_fallbacks"] = ["nbg1"]
+    config["rebuild"]["manual_create"]["locations"] = ["nbg1", "fsn1", "hel1"]
     client = FakeCreateClient(
         [hetzner_error(412, "resource_unavailable", "capacity"), 9013]
     )
 
     result = client.create_missing_server(
         "2",
-        manual_config(),
+        config,
         server_type="cx53",
         preferred_location="hel1",
         allow_fallback=False,
     )
 
     assert result["success"] is False
+    assert result["error_code"] == "resource_unavailable"
     assert result["attempted_locations"] == ["hel1"]
     assert [
         payload["location"] for payload in client.create_payloads

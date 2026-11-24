@@ -1035,11 +1035,14 @@ def _manual_create_options(config: Dict[str, Any]) -> Dict[str, Any]:
     if default_server_type and default_server_type not in server_types:
         server_types.insert(0, default_server_type)
 
-    locations = [
-        str(location).strip().lower()
-        for location in _rebuild_locations(config, "")
-        if str(location).strip()
-    ]
+    raw_locations = manual_cfg.get("locations", _rebuild_locations(config, ""))
+    if not isinstance(raw_locations, list):
+        raw_locations = []
+    locations: List[str] = []
+    for value in raw_locations:
+        location = str(value or "").strip().lower()
+        if location and location not in locations:
+            locations.append(location)
     enabled = bool(
         manual_cfg.get("enabled")
         and default_server_type
@@ -3908,7 +3911,7 @@ async def api_create_missing(request: Request) -> JSONResponse:
     preferred_location = (
         str(payload.get("preferred_location") or "").strip() or None
     )
-    raw_allow_fallback = payload.get("allow_fallback", True)
+    raw_allow_fallback = payload.get("allow_fallback", False)
     if not isinstance(raw_allow_fallback, bool):
         return JSONResponse(
             {

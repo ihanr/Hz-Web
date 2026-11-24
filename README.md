@@ -154,16 +154,16 @@ rebuild:
     "2": "YOUR_SNAPSHOT_ID"
   location_fallbacks:
     - nbg1
-    - fsn1
-    - hel1
   manual_create:
     enabled: true
     server_type: cx33
     server_types: [cx33, cx43, cx53]
+    locations: [nbg1, fsn1, hel1]
 ```
 
 - 自动超限重建始终从快照创建。
-- 依次尝试 `location_fallbacks`；所有地区无容量时只通知，不会自动重复创建。
+- 自动重建使用 `location_fallbacks`。只配置一个地区时，临时无容量最多尝试 5 次，每次间隔 60 秒。
+- 手动创建使用 `manual_create.locations`，第一项为默认地区。省略时沿用 `location_fallbacks`。默认只尝试选中的地区，勾选地区回退后才会尝试其他地区。
 - WebUI 中“创建服务器”可选择项目快照或官方系统镜像。系统镜像创建必须选择项目内 SSH Key；镜像、规格、架构和磁盘大小会在创建前再次校验。
 - `snapshot_id_map` 的键使用服务器名称，不是 Hetzner 服务器 ID。
 

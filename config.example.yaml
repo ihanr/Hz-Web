@@ -60,6 +60,7 @@ rebuild:
     enabled: false
     server_type: "cx33"
     server_types: ["cx33", "cx43", "cx53"]
+    locations: ["nbg1", "fsn1", "hel1"]
   fallback_template:
     server_type: "cx43"
     location: "nbg1"

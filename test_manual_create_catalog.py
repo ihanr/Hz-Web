@@ -166,6 +166,18 @@ def test_catalog_normalizes_available_project_resources():
     }
 
 
+def test_manual_catalog_uses_its_own_location_list():
+    config = manual_config()
+    config["rebuild"]["location_fallbacks"] = ["nbg1"]
+    config["rebuild"]["manual_create"]["locations"] = ["nbg1", "fsn1", "hel1"]
+
+    catalog = main._build_manual_create_catalog("2", config, FakeCatalogClient())
+
+    assert catalog["locations"] == ["nbg1", "fsn1", "hel1"]
+    assert catalog["default_location"] == "nbg1"
+    assert main._rebuild_locations(config, "hel1") == ["nbg1"]
+
+
 @pytest.mark.parametrize(
     ("name", "enabled", "servers", "code"),
     [
